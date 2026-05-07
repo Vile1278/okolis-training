@@ -1,0 +1,25 @@
+# RTX A6000 — 48GB VRAM
+datasets:
+  toronto3d:
+    root: /workspace/data/Toronto_3D
+    weight: 1.0
+  semantickitti:
+    root: /workspace/data/SemanticKITTI
+    weight: 0.7
+
+# Load every Nth KITTI scan (saves RAM — 19K scans × 120K pts = ~92GB without this)
+kitti_scan_stride: 5
+
+crop_points: 131072
+voxel: 0.02
+augment: true
+modality_dropout: true
+steps_per_epoch: 1000
+
+batch_size: 16
+num_classes: 8
+in_feat_dim: 5
+lr: 0.002
+epochs: 150
+out_dir: /workspace/runs/rtx_a6000
+num_workers: 8
