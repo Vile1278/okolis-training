@@ -194,10 +194,15 @@ class RandLANet(nn.Module):
         d_in = 3 + in_feat_dim
         self.fc_start = SharedMLP(d_in, d_out[0])
 
-        # Encoder: one LFA per layer
+        # Encoder: LFA at each resolution level (same in/out dims)
         self.encoders = nn.ModuleList()
         for i in range(self.n_layers):
             self.encoders.append(LocalFeatureAggregation(d_out[i], d_out[i], k=k))
+
+        # Dimension-lifting MLPs between encoder levels
+        self.dim_up = nn.ModuleList()
+        for i in range(self.n_layers - 1):
+            self.dim_up.append(SharedMLP(d_out[i], d_out[i + 1]))
 
         # Decoder: upsample + skip connection MLPs
         self.decoder_mlps = nn.ModuleList()
@@ -237,11 +242,14 @@ class RandLANet(nn.Module):
 
             # kNN
             neigh_idx = chunked_knn(cur_xyz, self.k)
-            # LFA
+            # LFA (same in/out dims at each level)
             cur_feat = encoder(cur_xyz, cur_feat, neigh_idx)
 
             # Random sub-sampling (ratio 4) except last layer
             if i < self.n_layers - 1:
+                # Lift dimension before downsampling: d_out[i] -> d_out[i+1]
+                cur_feat = self.dim_up[i](
+                    cur_feat.permute(0, 2, 1)).permute(0, 2, 1)
                 n_sub = max(cur_N // 4, 1)
                 sub_xyz, sub_feat, _ = random_sample(cur_xyz, cur_feat, n_sub)
                 xyz_stack.append(sub_xyz)

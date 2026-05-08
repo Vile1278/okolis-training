@@ -405,7 +405,7 @@ def train(cfg):
     print(f"[train] device={device}")
     if torch.cuda.is_available():
         print(f"[train] GPU: {torch.cuda.get_device_name()}")
-        vram = torch.cuda.get_device_properties(0).total_mem / 1e9
+        vram = torch.cuda.get_device_properties(0).total_memory / 1e9
         print(f"[train] VRAM: {vram:.1f} GB")
 
     out_dir = Path(cfg.get("out_dir", "runs/default"))
