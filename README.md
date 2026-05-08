@@ -60,11 +60,12 @@ unzip Toronto_3D.zip
 ```
 
 **SemanticKITTI**:
-1. Registriraj se na https://www.semantic-kitti.org/
-2. Prihvati uvjete korištenja
-3. Preuzmi KITTI Odometry Velodyne data sa http://www.cvlibs.net/datasets/kitti/eval_odometry.php
-4. Preuzmi SemanticKITTI label data sa semantic-kitti.org
-5. Raspakiraj u `/workspace/data/SemanticKITTI/dataset/sequences/`
+mkdir -p /workspace/data/SemanticKITTI
+cd /workspace/data/SemanticKITTI
+wget "https://s3.eu-central-1.amazonaws.com/avg-kitti/data_odometry_velodyne.zip" -O velodyne.zip
+wget "https://www.semantic-kitti.org/assets/data_odometry_labels.zip" -O labels.zip
+python -c "import zipfile; zipfile.ZipFile('velodyne.zip').extractall('.')"
+python -c "import zipfile; zipfile.ZipFile('labels.zip').extractall('.')"
 
 Očekivana struktura:
 ```
