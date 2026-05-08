@@ -52,11 +52,11 @@ cd okolis-training
 
 **Toronto3D** (slobodan pristup):
 ```bash
-mkdir -p /workspace/data/Toronto_3D
+export KAGGLE_API_TOKEN="kaggle api"
 cd /workspace/data/Toronto_3D
-# Preuzmi sa Zenodo:
-wget https://zenodo.org/records/4570104/files/Toronto_3D.zip
-unzip Toronto_3D.zip
+kaggle datasets download -d priteshraj10/point-cloud-lidar-toronto-3d
+python -c "import zipfile; zipfile.ZipFile('point-cloud-lidar-toronto-3d.zip').extractall('.')"
+ls *.ply
 ```
 
 **SemanticKITTI**:
@@ -68,6 +68,14 @@ wget "https://www.semantic-kitti.org/assets/data_odometry_labels.zip" -O labels.
 python -c "import zipfile; zipfile.ZipFile('velodyne.zip').extractall('.')"
 python -c "import zipfile; zipfile.ZipFile('labels.zip').extractall('.')"
 ```
+
+
+provjera strukture:
+```bash
+ls dataset/sequences/00/velodyne/ | head -3
+ls dataset/sequences/00/labels/ | head -3
+```
+
 
 Očekivana struktura:
 ```
