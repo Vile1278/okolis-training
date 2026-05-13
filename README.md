@@ -52,6 +52,7 @@ cd okolis-training
 
 **Toronto3D** (slobodan pristup):
 ```bash
+pip install kaggle
 export KAGGLE_API_TOKEN="kaggle api"
 cd /workspace/data/Toronto_3D
 kaggle datasets download -d priteshraj10/point-cloud-lidar-toronto-3d
