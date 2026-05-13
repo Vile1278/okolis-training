@@ -13,10 +13,6 @@ datasets:
     root: /workspace/data/Pandaset
     weight: 0.8
     stride: 5         # every 5th frame (solid-state LiDAR, good for our use case)
-  3dref:
-    root: /workspace/data/3DRef
-    weight: 1.0        # highest weight — Livox Avia closest to iPhone LiDAR
-    stride: 1
 
 # SemanticKITTI: load every Nth scan (saves RAM)
 kitti_scan_stride: 5
