@@ -30,33 +30,37 @@ from losses import LovaszSoftmax, class_weighted_ce
 NUM_CLASSES = 8
 CLASS_NAMES = [
     "unlabeled", "ground", "road", "sidewalk",
-    "building", "fence", "vegetation", "pole",
+    "building", "fence", "vegetation", "vehicle",
 ]
 
+# Toronto3D: 0=unclass, 1=ground, 2=road_marking, 3=natural(veg),
+#             4=building, 5=utility_line, 6=pole, 7=car, 8=fence
 TORONTO3D_MAP = {
-    0: 0, 1: 2, 2: 2, 3: 6, 4: 4, 5: 7, 6: 7, 7: 0, 8: 5,
+    0: 0, 1: 2, 2: 2, 3: 6, 4: 4, 5: 0, 6: 0, 7: 7, 8: 5,
+    #                                 ^pole→unlabeled  ^car→vehicle
 }
 
 # SemanticKITTI RAW label -> unified 8-class
-# Note: KITTI uses raw label IDs (not learning IDs), so we map those directly
 SEMKITTI_RAW_MAP = {
     0: 0, 1: 0,
-    10: 0, 11: 0, 13: 0, 15: 0, 16: 0, 18: 0, 20: 0,  # vehicles -> unlabeled
-    30: 0, 31: 0, 32: 0,                                  # persons -> unlabeled
+    10: 7, 11: 7, 13: 7, 15: 7, 16: 7, 18: 7, 20: 7,  # car/truck/motorcycle/etc → vehicle
+    30: 0, 31: 0, 32: 0,                                  # persons → unlabeled
     40: 2, 44: 3, 48: 3, 49: 1,                            # road/parking/sidewalk/other-ground
     50: 4, 51: 5, 52: 0,                                   # building/fence/other-struct
-    60: 2,                                                  # lane-marking -> road
+    60: 2,                                                  # lane-marking → road
     70: 6, 71: 6, 72: 1,                                   # vegetation/trunk/terrain
-    80: 7, 81: 7,                                           # pole/traffic-sign
+    80: 0, 81: 0,                                           # pole/traffic-sign → unlabeled
     99: 0,
-    252: 0, 253: 0, 254: 0, 255: 0, 256: 0, 257: 0, 258: 0, 259: 0,
+    252: 7, 253: 7, 254: 7, 255: 7, 256: 7, 257: 7, 258: 7, 259: 7,  # moving vehicles → vehicle
 }
 
 # Pandaset class mapping → unified 8-class
 # Pandaset classes: 0=unknown, 1=smoke, 2=exhaust, 3=spray/rain, 4=drone,
 # 5=vent, 6=background, 7=noise, 8=fog, 9=vegetation, 10=ground,
 # 11=sidewalk, 12=curb, 13=building, 14=fence, 15=pole, 16=sign,
-# 17=wall, 18=car, ..., 41=other
+# 17=wall, 18=car, 19=pickup_truck, 20=medium_truck, 21=semi_truck,
+# 22=towed_object, 23=motorcycle, 24=other_vehicle, 25=bus, 26=personal_mobility,
+# 27=train, 28=pedestrian, ..., 41=other
 PANDASET_MAP = {
     0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0,
     9: 6,    # vegetation
@@ -65,20 +69,22 @@ PANDASET_MAP = {
     12: 3,   # curb → sidewalk
     13: 4,   # building
     14: 5,   # fence
-    15: 7,   # pole
-    16: 7,   # sign → pole
+    15: 0,   # pole → unlabeled
+    16: 0,   # sign → unlabeled
     17: 4,   # wall → building
-    18: 0, 19: 0, 20: 0, 21: 0, 22: 0, 23: 0, 24: 0, 25: 0,
+    18: 7,   # car → vehicle
+    19: 7,   # pickup_truck → vehicle
+    20: 7,   # medium_truck → vehicle
+    21: 7,   # semi_truck → vehicle
+    22: 7,   # towed_object → vehicle
+    23: 7,   # motorcycle → vehicle
+    24: 7,   # other_vehicle → vehicle
+    25: 7,   # bus → vehicle
     26: 0, 27: 0, 28: 0, 29: 0, 30: 0, 31: 0, 32: 0, 33: 0,
     34: 0, 35: 0, 36: 0, 37: 0, 38: 0, 39: 0, 40: 0, 41: 0,
-    # Vehicles/pedestrians → unlabeled (not in our taxonomy)
 }
 
 # 3DRef (Livox Avia, solid-state LiDAR closest to iPhone)
-# Classes: 0=unlabeled, 1=wall, 2=floor, 3=cabinet, 4=bed, 5=chair,
-# 6=sofa, 7=table, 8=door, 9=window, 10=shelf, 11=picture, 12=counter,
-# 13=desk, 14=curtain, 15=refrigerator, 16=shower_curtain, 17=toilet,
-# 18=sink, 19=bathtub, 20=other, 21=ceiling
 # NOTE: 3DRef is mixed indoor/outdoor. We keep outdoor-relevant classes.
 THREEREF_MAP = {
     0: 0,    # unlabeled
@@ -94,7 +100,7 @@ THREEREF_MAP = {
     103: 4,  # building
     104: 5,  # fence
     105: 6,  # vegetation
-    106: 7,  # pole
+    106: 7,  # vehicle
 }
 
 

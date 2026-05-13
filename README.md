@@ -14,12 +14,12 @@ Koristi Toronto3D + SemanticKITTI datasete.
 | 4  | building    |
 | 5  | fence       |
 | 6  | vegetation  |
-| 7  | pole        |
+| 7  | vehicle     |
 
 ## Datoteke
 
 - `config.yaml` — konfiguracija (batch size, learning rate, putanje dataseta)
-- `model.py` — RandLA-Net implementacija
+- `model.py` — Point Transformer V3 implementacija
 - `losses.py` — Lovász-Softmax + weighted cross-entropy
 - `train.py` — cjelokupni trening skript
 - `train.ipynb` — Jupyter notebook za RunPod
