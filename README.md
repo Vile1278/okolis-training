@@ -50,6 +50,19 @@ cd okolis-training
 
 ### 5. Pripremiti datasete
 
+**Kaggle** 
+```bash
+mkdir /root/.kaggle
+echo '{"username":"TVOJ_USERNAME","key":"TVOJ_KEY"}' > /root/.kaggle/kaggle.json
+chmod 600 /root/.kaggle/kaggle.json
+```
+
+**Pandaset**
+```bash
+cd /workspace/data
+kaggle datasets download -d usharengaraju/pandaset-dataset --unzip -p Pandaset
+```
+
 **Toronto3D** (slobodan pristup):
 ```bash
 pip install kaggle
