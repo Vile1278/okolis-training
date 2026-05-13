@@ -1,300 +1,438 @@
-"""RandLA-Net: Efficient Semantic Segmentation of Large-Scale Point Clouds.
+"""Point Transformer V3 for outdoor point cloud semantic segmentation.
 
-Standalone implementation -- no external dependencies beyond PyTorch.
-Reference: Hu et al., "RandLA-Net", CVPR 2020.
+Standalone implementation — no external dependencies beyond PyTorch.
+Reference: Wu et al., "Point Transformer V3: Simpler, Faster, Stronger", CVPR 2024.
+
+Key ideas:
+  - Serialize unordered points via z-order (Morton) curves
+  - Windowed self-attention along the serialized order
+  - GridPool / GridUnpool for multi-scale encoder-decoder
+  - 4-stage architecture with skip connections
+
+Backward-compatible: `RandLANet = PointTransformerV3` alias so existing
+train.py / inference code keeps working without changes.
 """
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Serialization: Z-order (Morton) curve
+# ============================================================================
 
-class SharedMLP(nn.Module):
-    """Conv1d + BatchNorm + ReLU (operates on (B, C, N) tensors)."""
+def _interlace_bits(x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+    """Interleave lower 21 bits of x, y, z into a 63-bit Morton code.
 
-    def __init__(self, in_channels, out_channels, bn=True, activation=True):
-        super().__init__()
-        layers = [nn.Conv1d(in_channels, out_channels, 1, bias=not bn)]
-        if bn:
-            layers.append(nn.BatchNorm1d(out_channels))
-        if activation:
-            layers.append(nn.ReLU(inplace=True))
-        self.mlp = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.mlp(x)
-
-
-# ---------------------------------------------------------------------------
-# kNN with chunked computation to avoid OOM
-# ---------------------------------------------------------------------------
-
-def chunked_knn(xyz, k, chunk_size=4096):
-    """Return kNN indices (B, N, k) using chunked torch.cdist.
-
-    Processing in chunks avoids allocating a full (B, N, N) distance matrix.
+    Works on integer tensors. Output dtype is int64.
     """
-    B, N, _ = xyz.shape
-    device = xyz.device
-    idx = torch.zeros(B, N, k, dtype=torch.long, device=device)
-    for start in range(0, N, chunk_size):
-        end = min(start + chunk_size, N)
-        dists = torch.cdist(xyz[:, start:end], xyz)  # (B, chunk, N)
-        _, topk_idx = dists.topk(k, dim=-1, largest=False)
-        idx[:, start:end] = topk_idx
-    return idx
+    def spread(v: torch.Tensor) -> torch.Tensor:
+        # Spread 21 bits of v across 63 bits (every 3rd position)
+        v = v.long() & 0x1FFFFF  # clamp to 21 bits
+        v = (v | (v << 32)) & 0x1F00000000FFFF
+        v = (v | (v << 16)) & 0x1F0000FF0000FF
+        v = (v | (v << 8))  & 0x100F00F00F00F00F
+        v = (v | (v << 4))  & 0x10C30C30C30C30C3
+        v = (v | (v << 2))  & 0x1249249249249249
+        return v
+
+    return spread(x) | (spread(y) << 1) | (spread(z) << 2)
 
 
-# ---------------------------------------------------------------------------
-# Random Sampling (faster than FPS for large clouds)
-# ---------------------------------------------------------------------------
-
-def random_sample(xyz, feats, n_out):
-    """Randomly subsample n_out points from N points.
-
-    Returns: xyz_sub (B, n_out, 3), feats_sub (B, n_out, C), idx (B, n_out)
-    """
-    B, N, _ = xyz.shape
-    if n_out >= N:
-        return xyz, feats, torch.arange(N, device=xyz.device).unsqueeze(0).expand(B, -1)
-    idx = torch.stack([torch.randperm(N, device=xyz.device)[:n_out] for _ in range(B)])
-    idx_sorted, _ = idx.sort(dim=1)
-    xyz_sub = torch.gather(xyz, 1, idx_sorted.unsqueeze(-1).expand(-1, -1, 3))
-    feats_sub = torch.gather(feats, 1, idx_sorted.unsqueeze(-1).expand(-1, -1, feats.shape[-1]))
-    return xyz_sub, feats_sub, idx_sorted
-
-
-# ---------------------------------------------------------------------------
-# Local Feature Aggregation (LFA)
-# ---------------------------------------------------------------------------
-
-class AttentionPooling(nn.Module):
-    """Learnable attention pooling over k neighbours."""
-
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.score_fn = nn.Sequential(
-            nn.Linear(in_channels, in_channels, bias=False),
-            nn.Softmax(dim=-2),
-        )
-        self.mlp = SharedMLP(in_channels, out_channels)
-
-    def forward(self, x):
-        """x: (B, N, k, C) -> (B, N, C_out)."""
-        scores = self.score_fn(x)          # (B, N, k, C)
-        out = (x * scores).sum(dim=2)      # (B, N, C)
-        out = out.permute(0, 2, 1)         # (B, C, N)
-        out = self.mlp(out)                # (B, C_out, N)
-        return out.permute(0, 2, 1)        # (B, N, C_out)
-
-
-class LocalFeatureAggregation(nn.Module):
-    """Two rounds of local spatial encoding + attentive pooling + skip."""
-
-    def __init__(self, d_in, d_out, k=16):
-        super().__init__()
-        self.k = k
-        self.mlp_pre = SharedMLP(d_in, d_out // 2)
-
-        # Round 1: relative pos encoding (10-dim) -> d_out//2
-        self.lse1 = SharedMLP(10, d_out // 2)
-        self.pool1 = AttentionPooling(d_out, d_out // 2)
-
-        # Round 2
-        self.lse2 = SharedMLP(10, d_out // 2)
-        self.pool2 = AttentionPooling(d_out, d_out)
-
-        self.shortcut = SharedMLP(d_in, d_out, activation=False)
-        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
-
-    @staticmethod
-    def _gather(src, idx):
-        """Gather features: src (B,N,C), idx (B,N,k) -> (B,N,k,C)."""
-        B, N, k = idx.shape
-        C = src.shape[-1]
-        idx_flat = idx.reshape(B, -1)  # (B, N*k)
-        out = torch.gather(src, 1, idx_flat.unsqueeze(-1).expand(-1, -1, C))
-        return out.reshape(B, N, k, C)
-
-    def _relative_pos_encoding(self, xyz, neigh_idx):
-        """Compute 10-dim relative position encoding."""
-        B, N, k = neigh_idx.shape
-        neigh_xyz = self._gather(xyz, neigh_idx)             # (B, N, k, 3)
-        center_xyz = xyz.unsqueeze(2).expand(-1, -1, k, -1)  # (B, N, k, 3)
-        diff = neigh_xyz - center_xyz                         # (B, N, k, 3)
-        dist = torch.norm(diff, dim=-1, keepdim=True)         # (B, N, k, 1)
-        # [center, neighbour, diff, dist] -> 10 dims
-        return torch.cat([center_xyz, neigh_xyz, diff, dist], dim=-1)
-
-    def _encode_rpe(self, rpe, lse_module):
-        """Encode relative position: (B,N,k,10) -> (B,N,k,d_out//2)."""
-        B, N, k, _ = rpe.shape
-        rpe_flat = rpe.reshape(B * N, k, 10).permute(0, 2, 1)  # (B*N, 10, k)
-        enc = lse_module(rpe_flat)                               # (B*N, d_out//2, k)
-        return enc.permute(0, 2, 1).reshape(B, N, k, -1)        # (B, N, k, d_out//2)
-
-    def forward(self, xyz, feats, neigh_idx):
-        """
-        xyz:       (B, N, 3)
-        feats:     (B, N, d_in)
-        neigh_idx: (B, N, k)
-        Returns:   (B, N, d_out)
-        """
-        # Pre-MLP
-        f_pc = self.mlp_pre(feats.permute(0, 2, 1)).permute(0, 2, 1)  # (B, N, d_out//2)
-
-        # Relative position encoding (shared for both rounds)
-        rpe = self._relative_pos_encoding(xyz, neigh_idx)  # (B, N, k, 10)
-
-        # Round 1
-        rpe_enc1 = self._encode_rpe(rpe, self.lse1)           # (B, N, k, d_out//2)
-        f_neighbours1 = self._gather(f_pc, neigh_idx)         # (B, N, k, d_out//2)
-        f_concat1 = torch.cat([rpe_enc1, f_neighbours1], dim=-1)  # (B, N, k, d_out)
-        f_agg1 = self.pool1(f_concat1)                        # (B, N, d_out//2)
-
-        # Round 2
-        rpe_enc2 = self._encode_rpe(rpe, self.lse2)           # (B, N, k, d_out//2)
-        f_neighbours2 = self._gather(f_agg1, neigh_idx)       # (B, N, k, d_out//2)
-        f_concat2 = torch.cat([rpe_enc2, f_neighbours2], dim=-1)
-        f_agg2 = self.pool2(f_concat2)                        # (B, N, d_out)
-
-        # Shortcut
-        shortcut = self.shortcut(feats.permute(0, 2, 1)).permute(0, 2, 1)
-        return self.lrelu(f_agg2 + shortcut)
-
-
-# ---------------------------------------------------------------------------
-# RandLA-Net
-# ---------------------------------------------------------------------------
-
-class RandLANet(nn.Module):
-    """RandLA-Net for semantic segmentation of point clouds.
+def serialize_points(xyz: torch.Tensor, grid_size: float = 0.04) -> torch.Tensor:
+    """Compute z-order keys for point serialization.
 
     Args:
-        in_feat_dim: input feature dimension (default 5: RGB + intensity + HAG)
-        num_classes: number of output classes (default 8)
-        d_out:       feature dimensions at each encoding stage
-        k:           number of nearest neighbours
+        xyz: (B, N, 3) point coordinates
+        grid_size: voxel resolution for quantization
+
+    Returns:
+        order: (B, N) indices that sort points along z-order curve
     """
+    B, N, _ = xyz.shape
+    # Quantize to grid
+    coords = torch.floor(xyz / grid_size).long()
+    # Shift to non-negative
+    mins = coords.min(dim=1, keepdim=True).values
+    coords = coords - mins
 
-    def __init__(self, in_feat_dim=5, num_classes=8, d_out=None, k=16):
+    codes = _interlace_bits(coords[..., 0], coords[..., 1], coords[..., 2])
+    order = codes.argsort(dim=1)
+    return order
+
+
+def reorder(x: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
+    """Reorder tensor x (B, N, C) according to order (B, N)."""
+    B, N, C = x.shape
+    idx = order.unsqueeze(-1).expand(-1, -1, C)
+    return torch.gather(x, 1, idx)
+
+
+def unreorder(x: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
+    """Inverse of reorder: scatter back to original positions."""
+    B, N, C = x.shape
+    idx = order.unsqueeze(-1).expand(-1, -1, C)
+    out = torch.zeros_like(x)
+    out.scatter_(1, idx, x)
+    return out
+
+
+# ============================================================================
+# Windowed Multi-Head Self-Attention
+# ============================================================================
+
+class WindowedAttention(nn.Module):
+    """Multi-head self-attention within windows of serialized points."""
+
+    def __init__(self, dim: int, num_heads: int, window_size: int = 256,
+                 qkv_bias: bool = True, attn_drop: float = 0.0,
+                 proj_drop: float = 0.0):
         super().__init__()
-        if d_out is None:
-            d_out = [32, 64, 128, 256]
+        self.dim = dim
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
 
-        self.k = k
-        self.num_classes = num_classes
-        self.d_out = d_out
-        self.n_layers = len(d_out)
+        self.qkv = nn.Linear(dim, 3 * dim, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
 
-        # Initial feature lifting (xyz concat with feats)
-        d_in = 3 + in_feat_dim
-        self.fc_start = SharedMLP(d_in, d_out[0])
-
-        # Encoder: LFA at each resolution level (same in/out dims)
-        self.encoders = nn.ModuleList()
-        for i in range(self.n_layers):
-            self.encoders.append(LocalFeatureAggregation(d_out[i], d_out[i], k=k))
-
-        # Dimension-lifting MLPs between encoder levels
-        self.dim_up = nn.ModuleList()
-        for i in range(self.n_layers - 1):
-            self.dim_up.append(SharedMLP(d_out[i], d_out[i + 1]))
-
-        # Decoder: upsample + skip connection MLPs
-        self.decoder_mlps = nn.ModuleList()
-        for i in range(self.n_layers - 1, 0, -1):
-            self.decoder_mlps.append(SharedMLP(d_out[i] + d_out[i - 1], d_out[i - 1]))
-
-        # Final classifier
-        self.fc_end = nn.Sequential(
-            SharedMLP(d_out[0], 64),
-            SharedMLP(64, 32),
-            nn.Dropout(0.5),
-            nn.Conv1d(32, num_classes, 1),
-        )
-
-    def forward(self, xyz, features):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            xyz:      (B, N, 3)
-            features: (B, N, in_feat_dim)
+            x: (B, N, C) — already serialized
+        Returns:
+            (B, N, C)
+        """
+        B, N, C = x.shape
+        W = self.window_size
+
+        # Pad N to multiple of W
+        pad = (W - N % W) % W
+        if pad > 0:
+            x = F.pad(x, (0, 0, 0, pad))  # pad N dimension
+        Np = N + pad
+        nW = Np // W  # number of windows
+
+        # Reshape into windows: (B * nW, W, C)
+        x = x.reshape(B, nW, W, C).reshape(B * nW, W, C)
+
+        # QKV
+        qkv = self.qkv(x).reshape(B * nW, W, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B*nW, heads, W, head_dim)
+        q, k, v = qkv.unbind(0)
+
+        # Attention
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        out = (attn @ v).transpose(1, 2).reshape(B * nW, W, C)
+        out = self.proj(out)
+        out = self.proj_drop(out)
+
+        # Reshape back and remove padding
+        out = out.reshape(B, nW, W, C).reshape(B, Np, C)
+        if pad > 0:
+            out = out[:, :N]
+
+        return out
+
+
+# ============================================================================
+# Transformer Block
+# ============================================================================
+
+class TransformerBlock(nn.Module):
+    """Pre-norm transformer block: LN → Attention → LN → MLP."""
+
+    def __init__(self, dim: int, num_heads: int, window_size: int = 256,
+                 mlp_ratio: float = 4.0, drop: float = 0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = WindowedAttention(
+            dim, num_heads, window_size=window_size,
+            attn_drop=drop, proj_drop=drop)
+        self.norm2 = nn.LayerNorm(dim)
+        mlp_hidden = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_hidden),
+            nn.GELU(),
+            nn.Dropout(drop),
+            nn.Linear(mlp_hidden, dim),
+            nn.Dropout(drop),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
+# ============================================================================
+# Grid Pooling / Unpooling (multi-scale)
+# ============================================================================
+
+class GridPool(nn.Module):
+    """Voxel-based downsampling: average-pool features within grid cells.
+
+    Maps N points → M voxels (M < N). Returns pooled features, new xyz,
+    and the cluster assignments needed for unpooling.
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, grid_size: float = 0.08):
+        super().__init__()
+        self.grid_size = grid_size
+        self.linear = nn.Linear(in_dim, out_dim)
+        self.norm = nn.LayerNorm(out_dim)
+
+    def forward(self, xyz: torch.Tensor, feats: torch.Tensor):
+        """
+        Args:
+            xyz: (B, N, 3)
+            feats: (B, N, C_in)
+        Returns:
+            xyz_pooled: (B, M, 3)
+            feats_pooled: (B, M, C_out)
+            cluster: (B, N) — which voxel each point belongs to
+            M: int — number of voxels (max across batch)
+        """
+        B, N, C = feats.shape
+        g = self.grid_size
+        device = xyz.device
+
+        all_xyz = []
+        all_feats = []
+        all_cluster = []
+        max_M = 0
+
+        for b in range(B):
+            coords = torch.floor(xyz[b] / g).long()  # (N, 3)
+            mins = coords.min(dim=0).values
+            coords = coords - mins
+
+            # Hash to flat index
+            dims = coords.max(dim=0).values + 1
+            keys = (coords[:, 0] * dims[1] * dims[2]
+                    + coords[:, 1] * dims[2]
+                    + coords[:, 2])
+
+            unique_keys, cluster = torch.unique(keys, return_inverse=True)
+            M = len(unique_keys)
+            max_M = max(max_M, M)
+
+            # Scatter-mean for xyz and feats
+            xyz_sum = torch.zeros(M, 3, device=device, dtype=xyz.dtype)
+            feat_sum = torch.zeros(M, C, device=device, dtype=feats.dtype)
+            count = torch.zeros(M, device=device, dtype=feats.dtype)
+
+            xyz_sum.scatter_add_(0, cluster.unsqueeze(-1).expand(-1, 3), xyz[b])
+            feat_sum.scatter_add_(0, cluster.unsqueeze(-1).expand(-1, C), feats[b])
+            count.scatter_add_(0, cluster, torch.ones(N, device=device, dtype=feats.dtype))
+            count = count.clamp(min=1)
+
+            xyz_mean = xyz_sum / count.unsqueeze(-1)
+            feat_mean = feat_sum / count.unsqueeze(-1)
+
+            all_xyz.append(xyz_mean)
+            all_feats.append(feat_mean)
+            all_cluster.append(cluster)
+
+        # Pad to max_M across batch
+        xyz_pooled = torch.zeros(B, max_M, 3, device=device, dtype=xyz.dtype)
+        feats_pooled = torch.zeros(B, max_M, C, device=device, dtype=feats.dtype)
+        cluster_out = torch.zeros(B, N, device=device, dtype=torch.long)
+
+        for b in range(B):
+            M = len(all_xyz[b])
+            xyz_pooled[b, :M] = all_xyz[b]
+            feats_pooled[b, :M] = all_feats[b]
+            cluster_out[b] = all_cluster[b]
+
+        feats_pooled = self.norm(self.linear(feats_pooled))
+        return xyz_pooled, feats_pooled, cluster_out, max_M
+
+
+class GridUnpool(nn.Module):
+    """Upsample by scattering voxel features back to original points.
+
+    Uses cluster assignments from GridPool + skip connection from encoder.
+    """
+
+    def __init__(self, in_dim: int, skip_dim: int, out_dim: int):
+        super().__init__()
+        self.linear = nn.Linear(in_dim + skip_dim, out_dim)
+        self.norm = nn.LayerNorm(out_dim)
+
+    def forward(self, feats: torch.Tensor, cluster: torch.Tensor,
+                skip: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            feats: (B, M, C_in) — decoder features at coarse level
+            cluster: (B, N) — cluster assignments from GridPool
+            skip: (B, N, C_skip) — encoder skip features at fine level
+        Returns:
+            (B, N, C_out)
+        """
+        B, N = cluster.shape
+        C_in = feats.shape[-1]
+
+        # Gather: scatter coarse features to fine points
+        idx = cluster.unsqueeze(-1).expand(-1, -1, C_in)
+        upsampled = torch.gather(feats, 1, idx)  # (B, N, C_in)
+
+        cat = torch.cat([upsampled, skip], dim=-1)
+        return self.norm(self.linear(cat))
+
+
+# ============================================================================
+# Point Transformer V3
+# ============================================================================
+
+class PointTransformerV3(nn.Module):
+    """Point Transformer V3 for semantic segmentation.
+
+    4-stage encoder-decoder with serialized windowed attention and
+    grid-based pooling/unpooling.
+
+    Args:
+        in_feat_dim: input per-point feature dimension (5 = RGB + intensity + HAG)
+        num_classes: number of output semantic classes
+        dims: channel dimensions at each encoder stage
+        num_heads: attention heads at each stage
+        depths: number of transformer blocks at each stage
+        window_size: window size for serialized attention
+        grid_sizes: voxel sizes for GridPool between stages (len = n_stages - 1)
+        drop: dropout rate
+        serialize_grid: voxel size for z-order serialization
+    """
+
+    def __init__(self, in_feat_dim: int = 5, num_classes: int = 8,
+                 dims: tuple = (48, 96, 192, 384),
+                 num_heads: tuple = (3, 6, 12, 24),
+                 depths: tuple = (2, 2, 6, 2),
+                 window_size: int = 256,
+                 grid_sizes: tuple = (0.08, 0.16, 0.32),
+                 drop: float = 0.0,
+                 serialize_grid: float = 0.04):
+        super().__init__()
+        self.num_classes = num_classes
+        self.n_stages = len(dims)
+        self.serialize_grid = serialize_grid
+
+        assert len(dims) == len(num_heads) == len(depths)
+        assert len(grid_sizes) == len(dims) - 1
+
+        # ── Input embedding ──────────────────────────────────────────
+        self.input_proj = nn.Sequential(
+            nn.Linear(3 + in_feat_dim, dims[0]),
+            nn.LayerNorm(dims[0]),
+            nn.GELU(),
+            nn.Linear(dims[0], dims[0]),
+            nn.LayerNorm(dims[0]),
+        )
+
+        # ── Encoder stages ───────────────────────────────────────────
+        self.encoder_blocks = nn.ModuleList()
+        for i in range(self.n_stages):
+            stage = nn.Sequential(*[
+                TransformerBlock(dims[i], num_heads[i],
+                                window_size=window_size,
+                                mlp_ratio=4.0, drop=drop)
+                for _ in range(depths[i])
+            ])
+            self.encoder_blocks.append(stage)
+
+        # ── Grid pooling (between encoder stages) ────────────────────
+        self.pools = nn.ModuleList()
+        for i in range(self.n_stages - 1):
+            self.pools.append(GridPool(dims[i], dims[i + 1], grid_sizes[i]))
+
+        # ── Decoder (unpool + skip + transformer block) ──────────────
+        self.unpools = nn.ModuleList()
+        self.decoder_blocks = nn.ModuleList()
+        for i in range(self.n_stages - 2, -1, -1):
+            self.unpools.append(GridUnpool(dims[i + 1], dims[i], dims[i]))
+            self.decoder_blocks.append(
+                TransformerBlock(dims[i], num_heads[i],
+                                window_size=window_size,
+                                mlp_ratio=4.0, drop=drop))
+
+        # ── Classification head ──────────────────────────────────────
+        self.head = nn.Sequential(
+            nn.Linear(dims[0], dims[0]),
+            nn.LayerNorm(dims[0]),
+            nn.GELU(),
+            nn.Dropout(0.5),
+            nn.Linear(dims[0], num_classes),
+        )
+
+    def forward(self, xyz: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            xyz:      (B, N, 3) point coordinates
+            features: (B, N, in_feat_dim) per-point features
         Returns:
             logits:   (B, N, num_classes)
         """
         B, N, _ = xyz.shape
 
-        # Concat xyz + features, lift to d_out[0]
-        x = torch.cat([xyz, features], dim=-1)                          # (B, N, 3+d)
-        x = self.fc_start(x.permute(0, 2, 1)).permute(0, 2, 1)        # (B, N, d_out[0])
+        # ── Serialize points via z-order curve ───────────────────────
+        order = serialize_points(xyz, grid_size=self.serialize_grid)
+        xyz_s = reorder(xyz, order)
+        feat_s = reorder(features, order)
 
-        # ---- Encoder ----
-        xyz_stack = [xyz]
-        feat_stack = [x]
+        # ── Input projection ─────────────────────────────────────────
+        x = torch.cat([xyz_s, feat_s], dim=-1)  # (B, N, 3+d)
+        x = self.input_proj(x)                   # (B, N, dims[0])
 
-        for i, encoder in enumerate(self.encoders):
-            cur_xyz = xyz_stack[-1]
-            cur_feat = feat_stack[-1]
-            cur_N = cur_xyz.shape[1]
+        # ── Encoder ──────────────────────────────────────────────────
+        enc_feats = []    # skip connections
+        enc_xyz = []      # xyz at each scale
+        enc_clusters = [] # cluster assignments for unpooling
 
-            # kNN
-            neigh_idx = chunked_knn(cur_xyz, self.k)
-            # LFA (same in/out dims at each level)
-            cur_feat = encoder(cur_xyz, cur_feat, neigh_idx)
+        cur_xyz = xyz_s
+        cur_feat = x
 
-            # Random sub-sampling (ratio 4) except last layer
-            if i < self.n_layers - 1:
-                # Lift dimension before downsampling: d_out[i] -> d_out[i+1]
-                cur_feat = self.dim_up[i](
-                    cur_feat.permute(0, 2, 1)).permute(0, 2, 1)
-                n_sub = max(cur_N // 4, 1)
-                sub_xyz, sub_feat, _ = random_sample(cur_xyz, cur_feat, n_sub)
-                xyz_stack.append(sub_xyz)
-                feat_stack.append(sub_feat)
-            else:
-                feat_stack[-1] = cur_feat
+        for i in range(self.n_stages):
+            cur_feat = self.encoder_blocks[i](cur_feat)
+            enc_feats.append(cur_feat)
+            enc_xyz.append(cur_xyz)
 
-        # ---- Decoder (nearest-neighbour upsampling + skip) ----
-        dec_feat = feat_stack[-1]
-        dec_xyz = xyz_stack[-1]
+            if i < self.n_stages - 1:
+                cur_xyz, cur_feat, cluster, _ = self.pools[i](cur_xyz, cur_feat)
+                enc_clusters.append(cluster)
 
-        for j, mlp in enumerate(self.decoder_mlps):
-            target_layer = self.n_layers - 2 - j
-            target_xyz = xyz_stack[target_layer]
-            skip_feat = feat_stack[target_layer]
+                # Re-serialize at new scale
+                new_order = serialize_points(cur_xyz, grid_size=self.serialize_grid)
+                cur_xyz = reorder(cur_xyz, new_order)
+                cur_feat = reorder(cur_feat, new_order)
 
-            # Nearest-neighbour upsample
-            up_feat = self._nearest_upsample(dec_xyz, target_xyz, dec_feat)
-            cat_feat = torch.cat([up_feat, skip_feat], dim=-1)
-            dec_feat = mlp(cat_feat.permute(0, 2, 1)).permute(0, 2, 1)
-            dec_xyz = target_xyz
+        # ── Decoder ──────────────────────────────────────────────────
+        dec_feat = cur_feat
 
-        # ---- Classifier ----
-        logits = self.fc_end(dec_feat.permute(0, 2, 1))  # (B, C, N)
-        return logits.permute(0, 2, 1)                     # (B, N, C)
+        for j in range(self.n_stages - 1):
+            # j=0 → go from stage (n-1) to stage (n-2), etc.
+            enc_idx = self.n_stages - 2 - j
+            cluster = enc_clusters[enc_idx]
+            skip = enc_feats[enc_idx]
 
-    @staticmethod
-    def _nearest_upsample(src_xyz, tgt_xyz, src_feat):
-        """Nearest-neighbour upsample (chunked to save memory).
+            dec_feat = self.unpools[j](dec_feat, cluster, skip)
+            dec_feat = self.decoder_blocks[j](dec_feat)
 
-        src_xyz:  (B, M, 3)
-        tgt_xyz:  (B, N, 3) with N > M
-        src_feat: (B, M, C)
-        Returns:  (B, N, C)
-        """
-        B, N, _ = tgt_xyz.shape
-        C = src_feat.shape[-1]
-        device = tgt_xyz.device
-        out = torch.zeros(B, N, C, device=device, dtype=src_feat.dtype)
-        chunk = 4096
-        for start in range(0, N, chunk):
-            end = min(start + chunk, N)
-            dists = torch.cdist(tgt_xyz[:, start:end], src_xyz)  # (B, chunk, M)
-            nn_idx = dists.argmin(dim=-1)                         # (B, chunk)
-            out[:, start:end] = torch.gather(
-                src_feat, 1, nn_idx.unsqueeze(-1).expand(-1, -1, C)
-            )
-        return out
+        # ── Unsort back to original point order ──────────────────────
+        dec_feat = unreorder(dec_feat, order)
+
+        # ── Classify ─────────────────────────────────────────────────
+        logits = self.head(dec_feat)  # (B, N, num_classes)
+        return logits
+
+
+# ============================================================================
+# Backward-compatible alias
+# ============================================================================
+
+RandLANet = PointTransformerV3

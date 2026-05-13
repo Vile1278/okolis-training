@@ -1,7 +1,7 @@
 """Standalone training script for Okolis AI.
 
-Trains RandLA-Net on Toronto3D + SemanticKITTI for 8-class segmentation.
-All helpers are inline -- no imports from any parent project.
+Trains Point Transformer V3 on Toronto3D + SemanticKITTI + Pandaset + 3DRef
+for 8-class outdoor segmentation.  All helpers are inline.
 
 Usage:
     python train.py --config config.yaml
@@ -15,12 +15,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, List
 
-from model import RandLANet
+from model import PointTransformerV3, RandLANet  # RandLANet is alias
 from losses import LovaszSoftmax, class_weighted_ce
 
 
@@ -50,6 +50,51 @@ SEMKITTI_RAW_MAP = {
     80: 7, 81: 7,                                           # pole/traffic-sign
     99: 0,
     252: 0, 253: 0, 254: 0, 255: 0, 256: 0, 257: 0, 258: 0, 259: 0,
+}
+
+# Pandaset class mapping → unified 8-class
+# Pandaset classes: 0=unknown, 1=smoke, 2=exhaust, 3=spray/rain, 4=drone,
+# 5=vent, 6=background, 7=noise, 8=fog, 9=vegetation, 10=ground,
+# 11=sidewalk, 12=curb, 13=building, 14=fence, 15=pole, 16=sign,
+# 17=wall, 18=car, ..., 41=other
+PANDASET_MAP = {
+    0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0,
+    9: 6,    # vegetation
+    10: 1,   # ground
+    11: 3,   # sidewalk
+    12: 3,   # curb → sidewalk
+    13: 4,   # building
+    14: 5,   # fence
+    15: 7,   # pole
+    16: 7,   # sign → pole
+    17: 4,   # wall → building
+    18: 0, 19: 0, 20: 0, 21: 0, 22: 0, 23: 0, 24: 0, 25: 0,
+    26: 0, 27: 0, 28: 0, 29: 0, 30: 0, 31: 0, 32: 0, 33: 0,
+    34: 0, 35: 0, 36: 0, 37: 0, 38: 0, 39: 0, 40: 0, 41: 0,
+    # Vehicles/pedestrians → unlabeled (not in our taxonomy)
+}
+
+# 3DRef (Livox Avia, solid-state LiDAR closest to iPhone)
+# Classes: 0=unlabeled, 1=wall, 2=floor, 3=cabinet, 4=bed, 5=chair,
+# 6=sofa, 7=table, 8=door, 9=window, 10=shelf, 11=picture, 12=counter,
+# 13=desk, 14=curtain, 15=refrigerator, 16=shower_curtain, 17=toilet,
+# 18=sink, 19=bathtub, 20=other, 21=ceiling
+# NOTE: 3DRef is mixed indoor/outdoor. We keep outdoor-relevant classes.
+THREEREF_MAP = {
+    0: 0,    # unlabeled
+    1: 4,    # wall → building
+    2: 1,    # floor → ground
+    3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 10: 0,
+    11: 0, 12: 0, 13: 0, 14: 5, 15: 0, 16: 0, 17: 0,
+    18: 0, 19: 0, 20: 0, 21: 0,
+    # Extended outdoor labels (if present in 3DRef outdoor subset)
+    100: 1,  # ground
+    101: 2,  # road
+    102: 3,  # sidewalk
+    103: 4,  # building
+    104: 5,  # fence
+    105: 6,  # vegetation
+    106: 7,  # pole
 }
 
 
@@ -245,6 +290,183 @@ def load_semantickitti(root, train_sequences=None, stride=1):
             scans.append(LoadedScan(xyz=xyz, rgb=None, intensity=intensity, labels=labels))
 
     print(f"  SemanticKITTI total: {len(scans)} scans")
+    return scans
+
+
+def load_pandaset(root, stride=1):
+    """Load Pandaset LiDAR sequences. Returns list of LoadedScan.
+
+    Pandaset stores point clouds as .pkl.gz (pandas DataFrames)
+    or .npy files, one per frame.  Each sequence has a lidar/ folder
+    with timestamps as sub-folders.
+
+    Args:
+        root: path to pandaset root (containing sequence folders)
+        stride: load every Nth frame
+    """
+    import json
+    import gzip
+    import pickle
+
+    base = Path(root)
+    scans = []
+
+    seq_dirs = sorted([d for d in base.iterdir() if d.is_dir() and not d.name.startswith('.')])
+    print(f"  Pandaset: {len(seq_dirs)} sequences")
+
+    for seq_dir in seq_dirs:
+        lidar_dir = seq_dir / "lidar"
+        labels_dir = seq_dir / "annotations" / "semseg"
+        if not lidar_dir.exists() or not labels_dir.exists():
+            continue
+
+        timestamps = sorted([d.name for d in lidar_dir.iterdir() if d.is_dir()])[::stride]
+        loaded = 0
+
+        for ts in timestamps:
+            # Try .pkl.gz format first (standard Pandaset)
+            pkl_path = lidar_dir / ts / "lidar.pkl.gz"
+            npy_path = lidar_dir / ts / "points.npy"
+            lbl_path = labels_dir / ts / "semseg.pkl.gz"
+            lbl_npy = labels_dir / ts / "labels.npy"
+
+            xyz = None
+            intensity = None
+            label_raw = None
+
+            if pkl_path.exists():
+                with gzip.open(pkl_path, 'rb') as f:
+                    df = pickle.load(f)
+                xyz = df[['x', 'y', 'z']].values.astype(np.float32)
+                if 'i' in df.columns:
+                    intensity = np.clip(df['i'].values.astype(np.float32), 0, 1)
+            elif npy_path.exists():
+                pts = np.load(npy_path).astype(np.float32)
+                xyz = pts[:, :3]
+                if pts.shape[1] >= 4:
+                    intensity = np.clip(pts[:, 3], 0, 1).astype(np.float32)
+
+            if lbl_path.exists():
+                with gzip.open(lbl_path, 'rb') as f:
+                    lbl_df = pickle.load(f)
+                label_raw = lbl_df.values.flatten().astype(np.int64)
+            elif lbl_npy.exists():
+                label_raw = np.load(lbl_npy).astype(np.int64)
+
+            if xyz is None or label_raw is None:
+                continue
+            if len(xyz) != len(label_raw):
+                continue
+
+            labels = apply_map(label_raw, PANDASET_MAP)
+            scans.append(LoadedScan(xyz=xyz, rgb=None, intensity=intensity, labels=labels))
+            loaded += 1
+
+        if loaded > 0:
+            print(f"    Seq {seq_dir.name}: {loaded} frames")
+
+    total_pts = sum(s.xyz.shape[0] for s in scans) if scans else 0
+    print(f"  Pandaset total: {len(scans)} scans, {total_pts:,} points")
+    return scans
+
+
+def load_3dref(root, stride=1):
+    """Load 3DRef dataset (Livox Avia solid-state LiDAR).
+
+    3DRef stores scans as .ply or .pcd files with semantic labels.
+    The scan pattern (non-repetitive) is closest to iPhone LiDAR.
+
+    Args:
+        root: path to 3DRef root
+        stride: load every Nth scan
+    """
+    base = Path(root)
+    scans = []
+
+    # Try different directory structures
+    scan_dirs = []
+    for pattern in ["*.ply", "*.pcd", "**/*.ply", "**/*.pcd",
+                     "scans/*.ply", "point_clouds/*.ply"]:
+        found = sorted(base.glob(pattern))
+        if found:
+            scan_dirs = found[::stride]
+            break
+
+    # Also try .npy format
+    if not scan_dirs:
+        npy_files = sorted(base.glob("**/*.npy"))
+        if npy_files:
+            scan_dirs = npy_files[::stride]
+
+    print(f"  3DRef: {len(scan_dirs)} scan files")
+
+    for f in scan_dirs:
+        try:
+            if f.suffix == ".ply":
+                from plyfile import PlyData
+                ply = PlyData.read(str(f))
+                v = ply["vertex"].data
+                xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float32)
+
+                # Look for labels
+                label_raw = None
+                for key in ("label", "class", "scalar_Label", "semantic"):
+                    if key in v.dtype.names:
+                        label_raw = np.asarray(v[key], dtype=np.int64)
+                        break
+
+                rgb = None
+                if all(k in v.dtype.names for k in ("red", "green", "blue")):
+                    rgb = np.stack([v["red"], v["green"], v["blue"]],
+                                   axis=1).astype(np.float32)
+                    if rgb.max() > 1.0:
+                        rgb /= 255.0
+
+                intensity = None
+                for key in ("intensity", "i", "scalar_Intensity"):
+                    if key in v.dtype.names:
+                        raw = np.asarray(v[key], dtype=np.float32)
+                        mx = max(float(raw.max()), 1.0)
+                        intensity = (raw / mx).astype(np.float32)
+                        break
+
+                if label_raw is None:
+                    # Try companion .labels or .txt file
+                    lbl_file = f.with_suffix(".labels")
+                    if not lbl_file.exists():
+                        lbl_file = f.with_suffix(".txt")
+                    if lbl_file.exists():
+                        label_raw = np.loadtxt(str(lbl_file), dtype=np.int64)
+
+                if label_raw is None or len(xyz) == 0:
+                    continue
+
+                labels = apply_map(label_raw, THREEREF_MAP)
+                scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=intensity,
+                                        labels=labels))
+
+            elif f.suffix == ".npy":
+                data = np.load(f)
+                if data.shape[1] < 4:
+                    continue
+                xyz = data[:, :3].astype(np.float32)
+                label_raw = data[:, -1].astype(np.int64)
+                rgb = None
+                intensity = None
+                if data.shape[1] >= 7:  # x,y,z,r,g,b,label
+                    rgb = data[:, 3:6].astype(np.float32)
+                    if rgb.max() > 1.0:
+                        rgb /= 255.0
+
+                labels = apply_map(label_raw, THREEREF_MAP)
+                scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=intensity,
+                                        labels=labels))
+        except Exception as e:
+            print(f"    [WARN] Failed to load {f}: {e}")
+            continue
+
+    total_pts = sum(s.xyz.shape[0] for s in scans) if scans else 0
+    print(f"  3DRef total: {len(scans)} scans, {total_pts:,} points")
     return scans
 
 
@@ -454,6 +676,25 @@ def train(cfg):
         all_train_scans.extend(train_scans)
         all_val_scans.extend(val_scans)
 
+    if "pandaset" in ds_cfg:
+        root = ds_cfg["pandaset"]["root"]
+        ps_stride = ds_cfg["pandaset"].get("stride", 5)
+        ps_scans = load_pandaset(root, stride=ps_stride)
+        # Use 80/20 split: first 80% train, last 20% val
+        split = int(len(ps_scans) * 0.8)
+        all_train_scans.extend(ps_scans[:split])
+        if split < len(ps_scans):
+            all_val_scans.extend(ps_scans[split:])
+
+    if "3dref" in ds_cfg:
+        root = ds_cfg["3dref"]["root"]
+        ref_stride = ds_cfg["3dref"].get("stride", 1)
+        ref_scans = load_3dref(root, stride=ref_stride)
+        split = int(len(ref_scans) * 0.8)
+        all_train_scans.extend(ref_scans[:split])
+        if split < len(ref_scans):
+            all_val_scans.extend(ref_scans[split:])
+
     if not all_train_scans:
         raise RuntimeError("No training data! Check dataset paths in config.yaml")
 
@@ -480,10 +721,18 @@ def train(cfg):
     del all_train_scans, all_val_scans
     import gc; gc.collect()
 
-    # ---- Model ----
-    model = RandLANet(
+    # ---- Model (Point Transformer V3) ----
+    ptv3_cfg = cfg.get("ptv3", {})
+    model = PointTransformerV3(
         in_feat_dim=cfg.get("in_feat_dim", 5),
         num_classes=num_classes,
+        dims=tuple(ptv3_cfg.get("dims", [48, 96, 192, 384])),
+        num_heads=tuple(ptv3_cfg.get("num_heads", [3, 6, 12, 24])),
+        depths=tuple(ptv3_cfg.get("depths", [2, 2, 6, 2])),
+        window_size=ptv3_cfg.get("window_size", 256),
+        grid_sizes=tuple(ptv3_cfg.get("grid_sizes", [0.08, 0.16, 0.32])),
+        drop=ptv3_cfg.get("drop", 0.0),
+        serialize_grid=ptv3_cfg.get("serialize_grid", 0.04),
     ).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
@@ -510,7 +759,7 @@ def train(cfg):
 
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast():
+            with autocast(device_type="cuda", enabled=torch.cuda.is_available()):
                 logits = model(xyz, feats)
                 ce = class_weighted_ce(logits, labels)
                 lv = lovasz(logits, labels)
@@ -550,7 +799,12 @@ def train(cfg):
             "optimizer": optimizer.state_dict(),
             "miou": miou,
             "loss": avg_loss,
-            "cfg": {"num_classes": num_classes, "in_feat_dim": cfg.get("in_feat_dim", 5)},
+            "cfg": {
+                "num_classes": num_classes,
+                "in_feat_dim": cfg.get("in_feat_dim", 5),
+                "model": "ptv3",
+                "ptv3": ptv3_cfg,
+            },
         }
         torch.save(ckpt, out_dir / "last.pt")
 

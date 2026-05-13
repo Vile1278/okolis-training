@@ -1,4 +1,7 @@
-# RTX A6000 — 48GB VRAM
+# Point Transformer V3 — Okolis AI outdoor segmentation
+# Target: RunPod RTX A6000 (48GB VRAM)
+
+# ── Datasets ─────────────────────────────────────────────────────────────
 datasets:
   toronto3d:
     root: /workspace/data/Toronto_3D
@@ -6,20 +9,39 @@ datasets:
   semantickitti:
     root: /workspace/data/SemanticKITTI
     weight: 0.7
+  pandaset:
+    root: /workspace/data/Pandaset
+    weight: 0.8
+    stride: 5         # every 5th frame (solid-state LiDAR, good for our use case)
+  3dref:
+    root: /workspace/data/3DRef
+    weight: 1.0        # highest weight — Livox Avia closest to iPhone LiDAR
+    stride: 1
 
-# Load every Nth KITTI scan (saves RAM — 19K scans × 120K pts = ~92GB without this)
+# SemanticKITTI: load every Nth scan (saves RAM)
 kitti_scan_stride: 5
 
-crop_points: 65536
+# ── Point Transformer V3 architecture ────────────────────────────────────
+ptv3:
+  dims: [48, 96, 192, 384]
+  num_heads: [3, 6, 12, 24]
+  depths: [2, 2, 6, 2]
+  window_size: 256
+  grid_sizes: [0.08, 0.16, 0.32]    # voxel sizes for GridPool between stages
+  serialize_grid: 0.04               # z-order quantization grid
+  drop: 0.1                          # dropout (mild regularization)
+
+# ── Training ─────────────────────────────────────────────────────────────
+crop_points: 32768       # PTv3 uses more memory than RandLA → smaller crop
 voxel: 0.02
 augment: true
 modality_dropout: true
 steps_per_epoch: 1000
 
-batch_size: 4
+batch_size: 2            # PTv3 attention is memory-hungry; 2 fits 48GB
 num_classes: 8
-in_feat_dim: 5
-lr: 0.002
-epochs: 150
-out_dir: /workspace/runs/rtx_a6000
+in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
+lr: 0.0006               # lower LR for transformers (AdamW)
+epochs: 200              # more epochs — PTv3 converges slower but higher
+out_dir: /workspace/runs/ptv3_a6000
 num_workers: 8
