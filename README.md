@@ -62,6 +62,7 @@ chmod 600 /root/.kaggle/kaggle.json
 ```bash
 mkdir /workspace/data
 mkdir /workspace/data/Toronto_3D
+mkdir -p /workspace/data/SemanticKITTI
 ```
 
 **Pandaset**
@@ -81,7 +82,6 @@ ls *.ply
 
 **SemanticKITTI**:
 ```bash
-mkdir -p /workspace/data/SemanticKITTI
 cd /workspace/data/SemanticKITTI
 wget "https://s3.eu-central-1.amazonaws.com/avg-kitti/data_odometry_velodyne.zip" -O velodyne.zip
 wget "https://www.semantic-kitti.org/assets/data_odometry_labels.zip" -O labels.zip
