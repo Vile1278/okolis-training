@@ -302,16 +302,18 @@ def load_semantickitti(root, train_sequences=None, stride=1):
 def load_pandaset(root, stride=1):
     """Load Pandaset LiDAR sequences. Returns list of LoadedScan.
 
-    Pandaset stores point clouds as .pkl.gz (pandas DataFrames)
-    or .npy files, one per frame.  Each sequence has a lidar/ folder
-    with timestamps as sub-folders.
+    Pandaset structure (Kaggle version):
+        root/001/lidar/00.pkl, 01.pkl, ...
+        root/001/annotations/semseg/00.pkl, 01.pkl, ...
+
+    Each .pkl is a pickled pandas DataFrame.
+    Lidar: columns x, y, z, i, t, d
+    Semseg: single column with integer class labels.
 
     Args:
-        root: path to pandaset root (containing sequence folders)
+        root: path to pandaset root (containing sequence folders like 001, 002...)
         stride: load every Nth frame
     """
-    import json
-    import gzip
     import pickle
 
     base = Path(root)
@@ -326,47 +328,40 @@ def load_pandaset(root, stride=1):
         if not lidar_dir.exists() or not labels_dir.exists():
             continue
 
-        timestamps = sorted([d.name for d in lidar_dir.iterdir() if d.is_dir()])[::stride]
+        # List .pkl files directly in lidar/ folder
+        pkl_files = sorted(lidar_dir.glob("*.pkl"))[::stride]
         loaded = 0
 
-        for ts in timestamps:
-            # Try .pkl.gz format first (standard Pandaset)
-            pkl_path = lidar_dir / ts / "lidar.pkl.gz"
-            npy_path = lidar_dir / ts / "points.npy"
-            lbl_path = labels_dir / ts / "semseg.pkl.gz"
-            lbl_npy = labels_dir / ts / "labels.npy"
+        for pkl_path in pkl_files:
+            frame_name = pkl_path.stem  # e.g. "00", "01"
+            lbl_path = labels_dir / f"{frame_name}.pkl"
 
-            xyz = None
-            intensity = None
-            label_raw = None
+            if not lbl_path.exists():
+                continue
 
-            if pkl_path.exists():
-                with gzip.open(pkl_path, 'rb') as f:
+            try:
+                with open(pkl_path, 'rb') as f:
                     df = pickle.load(f)
                 xyz = df[['x', 'y', 'z']].values.astype(np.float32)
+                intensity = None
                 if 'i' in df.columns:
-                    intensity = np.clip(df['i'].values.astype(np.float32), 0, 1)
-            elif npy_path.exists():
-                pts = np.load(npy_path).astype(np.float32)
-                xyz = pts[:, :3]
-                if pts.shape[1] >= 4:
-                    intensity = np.clip(pts[:, 3], 0, 1).astype(np.float32)
+                    raw_i = df['i'].values.astype(np.float32)
+                    mx = max(float(np.nanmax(raw_i)), 1.0)
+                    intensity = np.clip(raw_i / mx, 0, 1).astype(np.float32)
 
-            if lbl_path.exists():
-                with gzip.open(lbl_path, 'rb') as f:
+                with open(lbl_path, 'rb') as f:
                     lbl_df = pickle.load(f)
                 label_raw = lbl_df.values.flatten().astype(np.int64)
-            elif lbl_npy.exists():
-                label_raw = np.load(lbl_npy).astype(np.int64)
 
-            if xyz is None or label_raw is None:
-                continue
-            if len(xyz) != len(label_raw):
-                continue
+                if len(xyz) != len(label_raw):
+                    continue
 
-            labels = apply_map(label_raw, PANDASET_MAP)
-            scans.append(LoadedScan(xyz=xyz, rgb=None, intensity=intensity, labels=labels))
-            loaded += 1
+                labels = apply_map(label_raw, PANDASET_MAP)
+                scans.append(LoadedScan(xyz=xyz, rgb=None, intensity=intensity, labels=labels))
+                loaded += 1
+            except Exception as e:
+                print(f"    [WARN] Failed {pkl_path}: {e}")
+                continue
 
         if loaded > 0:
             print(f"    Seq {seq_dir.name}: {loaded} frames")

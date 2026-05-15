@@ -34,7 +34,7 @@ augment: true
 modality_dropout: true
 steps_per_epoch: 1000
 
-batch_size: 2            # PTv3 attention is memory-hungry; 2 fits 48GB
+batch_size: 4            # PTv3 on 48GB VRAM — ~35-38GB usage
 num_classes: 8
 in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
 lr: 0.0006               # lower LR for transformers (AdamW)
