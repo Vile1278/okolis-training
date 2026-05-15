@@ -52,9 +52,15 @@ cd okolis-training
 
 **Kaggle** 
 ```bash
+pip install kaggle
 mkdir /root/.kaggle
 echo '{"username":"TVOJ_USERNAME","key":"TVOJ_KEY"}' > /root/.kaggle/kaggle.json
 chmod 600 /root/.kaggle/kaggle.json
+```
+
+**data dir** 
+```bash
+mkdir /workspace/.data
 ```
 
 **Pandaset**
@@ -65,7 +71,6 @@ kaggle datasets download -d usharengaraju/pandaset-dataset --unzip -p Pandaset
 
 **Toronto3D** (slobodan pristup):
 ```bash
-pip install kaggle
 export KAGGLE_API_TOKEN="kaggle api"
 cd /workspace/data/Toronto_3D
 kaggle datasets download -d priteshraj10/point-cloud-lidar-toronto-3d
