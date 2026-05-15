@@ -54,34 +54,47 @@ SEMKITTI_RAW_MAP = {
     252: 7, 253: 7, 254: 7, 255: 7, 256: 7, 257: 7, 258: 7, 259: 7,  # moving vehicles → vehicle
 }
 
-# Pandaset class mapping → unified 8-class
-# Pandaset classes: 0=unknown, 1=smoke, 2=exhaust, 3=spray/rain, 4=drone,
-# 5=vent, 6=background, 7=noise, 8=fog, 9=vegetation, 10=ground,
-# 11=sidewalk, 12=curb, 13=building, 14=fence, 15=pole, 16=sign,
-# 17=wall, 18=car, 19=pickup_truck, 20=medium_truck, 21=semi_truck,
-# 22=towed_object, 23=motorcycle, 24=other_vehicle, 25=bus, 26=personal_mobility,
-# 27=train, 28=pedestrian, ..., 41=other
+# Pandaset class mapping → unified 8-class (from classes.json)
+# 1=Smoke, 2=Exhaust, 3=Spray/rain, 4=Reflection, 5=Vegetation,
+# 6=Ground, 7=Road, 8=Lane Line, 9=Stop Line, 10=Other Road Marking,
+# 11=Sidewalk, 12=Driveway, 13=Car, 14=Pickup Truck, 15=Medium Truck,
+# 16=Semi-truck, 17=Towed Object, 18=Motorcycle, 19=Construction Vehicle,
+# 20=Uncommon Vehicle, 21=Pedicab, 22=Emergency Vehicle, 23=Bus,
+# 24=Personal Mobility, 25=Motorized Scooter, 26=Bicycle, 27=Train,
+# 28=Trolley, 29=Tram, 30=Pedestrian, 31=Pedestrian+Object,
+# 32=Bird, 33=Animals, 34=Pylons, 35=Road Barriers, 36=Signs,
+# 37=Cones, 38=Construction Signs, 39=Temp Barriers, 40=Rolling Containers,
+# 41=Building, 42=Other Static Object
 PANDASET_MAP = {
-    0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0,
-    9: 6,    # vegetation
-    10: 1,   # ground
-    11: 3,   # sidewalk
-    12: 3,   # curb → sidewalk
-    13: 4,   # building
-    14: 5,   # fence
-    15: 0,   # pole → unlabeled
-    16: 0,   # sign → unlabeled
-    17: 4,   # wall → building
-    18: 7,   # car → vehicle
-    19: 7,   # pickup_truck → vehicle
-    20: 7,   # medium_truck → vehicle
-    21: 7,   # semi_truck → vehicle
-    22: 7,   # towed_object → vehicle
-    23: 7,   # motorcycle → vehicle
-    24: 7,   # other_vehicle → vehicle
-    25: 7,   # bus → vehicle
-    26: 0, 27: 0, 28: 0, 29: 0, 30: 0, 31: 0, 32: 0, 33: 0,
-    34: 0, 35: 0, 36: 0, 37: 0, 38: 0, 39: 0, 40: 0, 41: 0,
+    1: 0, 2: 0, 3: 0, 4: 0,             # smoke/exhaust/spray/reflection → unlabeled
+    5: 6,    # Vegetation → vegetation
+    6: 1,    # Ground → ground
+    7: 2,    # Road → road
+    8: 2,    # Lane Line Marking → road
+    9: 2,    # Stop Line Marking → road
+    10: 2,   # Other Road Marking → road
+    11: 3,   # Sidewalk → sidewalk
+    12: 3,   # Driveway → sidewalk
+    13: 7,   # Car → vehicle
+    14: 7,   # Pickup Truck → vehicle
+    15: 7,   # Medium Truck → vehicle
+    16: 7,   # Semi-truck → vehicle
+    17: 7,   # Towed Object → vehicle
+    18: 7,   # Motorcycle → vehicle
+    19: 7,   # Construction Vehicle → vehicle
+    20: 7,   # Uncommon Vehicle → vehicle
+    21: 7,   # Pedicab → vehicle
+    22: 7,   # Emergency Vehicle → vehicle
+    23: 7,   # Bus → vehicle
+    24: 0, 25: 0, 26: 0,                  # personal mobility/scooter/bicycle → unlabeled
+    27: 0, 28: 0, 29: 0,                  # train/trolley/tram → unlabeled
+    30: 0, 31: 0,                          # pedestrians → unlabeled
+    32: 0, 33: 0,                          # animals → unlabeled
+    34: 0, 35: 5, 36: 0,                  # pylons→unlabeled, road barriers→fence, signs→unlabeled
+    37: 0, 38: 0, 39: 5,                  # cones→unlabeled, construction signs→unlabeled, temp barriers→fence
+    40: 0,                                 # rolling containers → unlabeled
+    41: 4,   # Building → building
+    42: 0,   # Other Static Object → unlabeled
 }
 
 # 3DRef (Livox Avia, solid-state LiDAR closest to iPhone)
