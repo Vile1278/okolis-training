@@ -60,7 +60,8 @@ chmod 600 /root/.kaggle/kaggle.json
 
 **data dir** 
 ```bash
-mkdir /workspace/.data
+mkdir /workspace/data
+mkdir /workspace/data/Toronto_3D
 ```
 
 **Pandaset**
