@@ -614,33 +614,114 @@ def _load_ply_generic(filepath):
     return v, xyz, rgb, intensity
 
 
-def load_hessigheim(root, stride=1):
+def _load_laz(filepath):
+    """Load a LAZ/LAS file. Returns (xyz, rgb, intensity, labels)."""
+    import laspy
+    las = laspy.read(str(filepath))
+    xyz = np.stack([las.x, las.y, las.z], axis=1).astype(np.float32)
+
+    rgb = None
+    if hasattr(las, 'red') and hasattr(las, 'green') and hasattr(las, 'blue'):
+        r = np.asarray(las.red, dtype=np.float32)
+        g = np.asarray(las.green, dtype=np.float32)
+        b = np.asarray(las.blue, dtype=np.float32)
+        # LAS RGB is often 16-bit (0-65535)
+        mx = max(float(r.max()), float(g.max()), float(b.max()), 1.0)
+        if mx > 255:
+            rgb = np.stack([r / 65535.0, g / 65535.0, b / 65535.0], axis=1)
+        elif mx > 1:
+            rgb = np.stack([r / 255.0, g / 255.0, b / 255.0], axis=1)
+        else:
+            rgb = np.stack([r, g, b], axis=1)
+        rgb = rgb.astype(np.float32)
+
+    intensity = None
+    if hasattr(las, 'intensity'):
+        raw_i = np.asarray(las.intensity, dtype=np.float32)
+        mx = max(float(np.nanmax(raw_i)), 1.0)
+        intensity = np.clip(raw_i / mx, 0, 1).astype(np.float32)
+
+    labels = None
+    if hasattr(las, 'classification'):
+        labels = np.asarray(las.classification, dtype=np.int64)
+
+    return xyz, rgb, intensity, labels
+
+
+def load_hessigheim(root, split="all"):
     """Load Hessigheim 3D (UAV LiDAR, German village).
 
-    H3D provides .ply files with per-point labels.
-    Structure: root/Epoch_March2018.ply (or similar filenames)
-    Labels in 'label' or 'class' or 'classification' field.
+    H3D structure (after extraction):
+        root/Mar19_train.laz   (or .txt)
+        root/Mar19_val.laz
+        root/Mar19_test_GroundTruth.laz
+
+    Supports LAZ/LAS, PLY, and TXT formats.
+    The dataset has pre-defined train/val/test splits.
+
+    Args:
+        root: path to Hessigheim3D folder
+        split: "train", "val", "test", or "all"
     """
     base = Path(root)
     scans = []
 
-    ply_files = sorted(base.glob("*.ply"))
-    if not ply_files:
-        ply_files = sorted(base.glob("**/*.ply"))
-    ply_files = ply_files[::stride]
-    print(f"  Hessigheim: {len(ply_files)} files")
+    # Find files matching split pattern
+    patterns = []
+    if split in ("train", "all"):
+        patterns.append("*train*")
+    if split in ("val", "all"):
+        patterns.append("*val*")
+    if split in ("test", "all"):
+        patterns.append("*test*GroundTruth*")  # test without GT has no labels
 
-    for f in ply_files:
+    scan_files = []
+    for pat in patterns:
+        for ext in (".laz", ".las", ".ply", ".txt"):
+            found = sorted(base.glob(pat + ext))
+            scan_files.extend(found)
+        # Also search subdirectories (e.g., Epoch_March2019/LiDAR/)
+        for ext in (".laz", ".las", ".ply"):
+            found = sorted(base.glob("**/" + pat + ext))
+            scan_files.extend(found)
+
+    # Deduplicate
+    scan_files = list(dict.fromkeys(scan_files))
+    print(f"  Hessigheim ({split}): {len(scan_files)} files")
+
+    for f in scan_files:
         try:
-            v, xyz, rgb, intensity = _load_ply_generic(f)
-            print(f"    {f.name}: {len(xyz):,} points", end="")
-
-            label_raw = None
-            for key in ("label", "class", "classification", "scalar_Label",
-                        "scalar_Classification"):
-                if key in v.dtype.names:
-                    label_raw = np.asarray(v[key], dtype=np.int64)
-                    break
+            if f.suffix in (".laz", ".las"):
+                xyz, rgb, intensity, label_raw = _load_laz(f)
+                print(f"    {f.name}: {len(xyz):,} points (LAZ)", end="")
+            elif f.suffix == ".ply":
+                v, xyz, rgb, intensity = _load_ply_generic(f)
+                label_raw = None
+                for key in ("label", "class", "classification",
+                            "scalar_Label", "scalar_Classification"):
+                    if key in v.dtype.names:
+                        label_raw = np.asarray(v[key], dtype=np.int64)
+                        break
+                print(f"    {f.name}: {len(xyz):,} points (PLY)", end="")
+            elif f.suffix == ".txt":
+                # H3D TXT: x y z intensity r g b label (space separated)
+                data = np.loadtxt(str(f), dtype=np.float32,
+                                  max_rows=None, comments='/')
+                xyz = data[:, :3].astype(np.float32)
+                intensity = None
+                rgb = None
+                label_raw = None
+                if data.shape[1] >= 8:
+                    intensity = np.clip(data[:, 3] / max(data[:, 3].max(), 1), 0, 1).astype(np.float32)
+                    rgb = data[:, 4:7].astype(np.float32)
+                    if rgb.max() > 1.0:
+                        rgb /= 255.0 if rgb.max() <= 255 else 65535.0
+                    label_raw = data[:, 7].astype(np.int64)
+                elif data.shape[1] >= 4:
+                    label_raw = data[:, -1].astype(np.int64)
+                print(f"    {f.name}: {len(xyz):,} points (TXT)", end="")
+            else:
+                continue
 
             if label_raw is None:
                 print(" [SKIP: no labels]")
@@ -728,25 +809,21 @@ def load_dales(root, stride=1):
     base = Path(root)
     scans = []
 
-    ply_files = []
+    scan_files = []
     for subdir in ["train", "test", "."]:
         d = base / subdir if subdir != "." else base
-        found = sorted(d.glob("*.ply"))
-        ply_files.extend(found)
-    # Also try .las format
-    if not ply_files:
-        for subdir in ["train", "test", "."]:
-            d = base / subdir if subdir != "." else base
-            found = sorted(d.glob("*.las"))
-            ply_files.extend(found)
+        for ext in ("*.ply", "*.las", "*.laz"):
+            found = sorted(d.glob(ext))
+            scan_files.extend(found)
+    # Deduplicate
+    scan_files = list(dict.fromkeys(scan_files))
+    scan_files = scan_files[::stride]
+    print(f"  DALES: {len(scan_files)} files")
 
-    ply_files = ply_files[::stride]
-    print(f"  DALES: {len(ply_files)} files")
-
-    for f in ply_files:
+    for f in scan_files:
         try:
-            if f.suffix == ".las":
-                # LAS format using laspy
+            if f.suffix in (".las", ".laz"):
+                # LAS/LAZ format using laspy
                 import laspy
                 las = laspy.read(str(f))
                 xyz = np.stack([las.x, las.y, las.z], axis=1).astype(np.float32)
@@ -1148,12 +1225,11 @@ def train(cfg):
 
     if "hessigheim" in ds_cfg:
         root = ds_cfg["hessigheim"]["root"]
-        h3d_stride = ds_cfg["hessigheim"].get("stride", 1)
-        h3d_scans = load_hessigheim(root, stride=h3d_stride)
-        split = int(len(h3d_scans) * 0.8)
-        all_train_scans.extend(h3d_scans[:split])
-        if split < len(h3d_scans):
-            all_val_scans.extend(h3d_scans[split:])
+        # H3D has pre-defined train/val/test splits
+        h3d_train = load_hessigheim(root, split="train")
+        h3d_val = load_hessigheim(root, split="val")
+        all_train_scans.extend(h3d_train)
+        all_val_scans.extend(h3d_val)
 
     if "semantic3d" in ds_cfg:
         root = ds_cfg["semantic3d"]["root"]

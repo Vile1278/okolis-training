@@ -25,12 +25,7 @@ datasets:
   semantic3d:                              # European villages, terrestrial scanner
     root: /workspace/data/Semantic3D
     weight: 1.2                            # high weight — street-level perspective
-  dales:                                   # USA suburban, aerial — has FENCE class
-    root: /workspace/data/DALES
-    weight: 0.8
-  vaihingen:                               # German suburb, aerial — fence/hedge + facade
-    root: /workspace/data/Vaihingen3D
-    weight: 1.0
+  # dales i vaihingen — izostavljeni (nedostupni za download)
   sensaturban:                             # UK cities, UAV — 3B points, residential
     root: /workspace/data/SensatUrban
     weight: 0.8
