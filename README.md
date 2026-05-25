@@ -1,4 +1,4 @@
-# Okoliš AI — Trening RandLA-Net
+# Okoliš AI — PTv3
 
 Standalone trening za 8-klasnu semantičku segmentaciju point cloudova.
 Koristi Toronto3D + SemanticKITTI datasete.
