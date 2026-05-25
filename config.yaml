@@ -1,8 +1,12 @@
 # Point Transformer V3 — Okolis AI outdoor segmentation
 # Target: RunPod RTX A6000 (48GB VRAM)
+#
+# 10 dataseta: 4 urbana + 6 rezidencijalnih/europskih
+# Ukupno ~5 milijardi točaka (s stride-om ~500M efektivno)
 
 # ── Datasets ─────────────────────────────────────────────────────────────
 datasets:
+  # ── Postojeći (urbani) ──
   toronto3d:
     root: /workspace/data/Toronto_3D
     weight: 1.0
@@ -12,7 +16,28 @@ datasets:
   pandaset:
     root: /workspace/data/Pandaset
     weight: 0.8
-    stride: 5         # every 5th frame (solid-state LiDAR, good for our use case)
+    stride: 5
+
+  # ── NOVI (rezidencijalni/europski) ──
+  hessigheim:                              # German village, UAV LiDAR — BEST match!
+    root: /workspace/data/Hessigheim3D
+    weight: 1.5                            # highest weight — closest to our use case
+  semantic3d:                              # European villages, terrestrial scanner
+    root: /workspace/data/Semantic3D
+    weight: 1.2                            # high weight — street-level perspective
+  dales:                                   # USA suburban, aerial — has FENCE class
+    root: /workspace/data/DALES
+    weight: 0.8
+  vaihingen:                               # German suburb, aerial — fence/hedge + facade
+    root: /workspace/data/Vaihingen3D
+    weight: 1.0
+  sensaturban:                             # UK cities, UAV — 3B points, residential
+    root: /workspace/data/SensatUrban
+    weight: 0.8
+    stride: 1
+  parislille:                              # French cities, mobile LiDAR — street level!
+    root: /workspace/data/ParisLille3D
+    weight: 1.0
 
 # SemanticKITTI: load every Nth scan (saves RAM)
 kitti_scan_stride: 5

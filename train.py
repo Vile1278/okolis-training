@@ -117,6 +117,108 @@ THREEREF_MAP = {
 }
 
 
+# Hessigheim 3D (UAV LiDAR, German village — residential!)
+# Classes: 0=Low Vegetation, 1=Impervious Surface, 2=Vehicle,
+#          3=Urban Furniture, 4=Roof, 5=Façade, 6=Shrub,
+#          7=Tree, 8=Soil/Gravel, 9=Vertical Surface, 10=Chimney
+HESSIGHEIM_MAP = {
+    0: 6,    # Low Vegetation → vegetation
+    1: 3,    # Impervious Surface → sidewalk (paved ground)
+    2: 7,    # Vehicle → vehicle
+    3: 0,    # Urban Furniture → unlabeled
+    4: 4,    # Roof → building
+    5: 4,    # Façade → building
+    6: 6,    # Shrub → vegetation
+    7: 6,    # Tree → vegetation
+    8: 1,    # Soil/Gravel → ground
+    9: 4,    # Vertical Surface → building (walls etc.)
+    10: 4,   # Chimney → building
+}
+
+# Semantic3D (terrestrial scanner, European villages/towns)
+# Classes: 1=man-made terrain, 2=natural terrain, 3=high vegetation,
+#          4=low vegetation, 5=buildings, 6=hard scape, 7=scanning artefacts, 8=cars
+SEMANTIC3D_MAP = {
+    0: 0,    # unlabeled
+    1: 2,    # man-made terrain → road (concrete/asphalt surfaces)
+    2: 1,    # natural terrain → ground
+    3: 6,    # high vegetation → vegetation
+    4: 6,    # low vegetation → vegetation
+    5: 4,    # buildings → building
+    6: 3,    # hard scape (sidewalks, curbs) → sidewalk
+    7: 0,    # scanning artefacts → unlabeled
+    8: 7,    # cars → vehicle
+}
+
+# DALES (aerial LiDAR, urban+suburban USA — has fence class!)
+# Classes: 1=ground, 2=vegetation, 3=cars, 4=trucks, 5=power lines,
+#          6=fences, 7=poles, 8=buildings
+DALES_MAP = {
+    0: 0,    # unlabeled
+    1: 1,    # ground → ground
+    2: 6,    # vegetation → vegetation
+    3: 7,    # cars → vehicle
+    4: 7,    # trucks → vehicle
+    5: 0,    # power lines → unlabeled
+    6: 5,    # fences → fence
+    7: 0,    # poles → unlabeled
+    8: 4,    # buildings → building
+}
+
+# ISPRS Vaihingen 3D (aerial LiDAR, German suburb — residential!)
+# Classes: 1=Powerline, 2=Low Vegetation, 3=Impervious Surface,
+#          4=Car, 5=Fence/Hedge, 6=Roof, 7=Façade, 8=Shrub, 9=Tree
+VAIHINGEN_MAP = {
+    0: 0,    # unlabeled
+    1: 0,    # Powerline → unlabeled
+    2: 6,    # Low Vegetation → vegetation (grass, lawn)
+    3: 3,    # Impervious Surface → sidewalk (paved ground)
+    4: 7,    # Car → vehicle
+    5: 5,    # Fence/Hedge → fence
+    6: 4,    # Roof → building
+    7: 4,    # Façade → building
+    8: 6,    # Shrub → vegetation
+    9: 6,    # Tree → vegetation
+}
+
+# SensatUrban (UAV photogrammetry, UK cities)
+# Classes: 0=ground, 1=high vegetation, 2=buildings, 3=walls,
+#          4=bridge, 5=parking, 6=rail, 7=traffic roads, 8=street furniture,
+#          9=cars, 10=footpath, 11=bikes, 12=water
+SENSATURBAN_MAP = {
+    0: 1,    # ground → ground
+    1: 6,    # high vegetation → vegetation
+    2: 4,    # buildings → building
+    3: 4,    # walls → building
+    4: 0,    # bridge → unlabeled
+    5: 2,    # parking → road
+    6: 0,    # rail → unlabeled
+    7: 2,    # traffic roads → road
+    8: 0,    # street furniture → unlabeled
+    9: 7,    # cars → vehicle
+    10: 3,   # footpath → sidewalk
+    11: 0,   # bikes → unlabeled
+    12: 0,   # water → unlabeled
+}
+
+# Paris-Lille-3D (mobile LiDAR, French cities — street level!)
+# Coarse classes: 0=unclassified, 1=ground, 2=building, 3=pole,
+#                 4=bollard, 5=trash can, 6=barrier, 7=pedestrian,
+#                 8=car, 9=natural (vegetation)
+PARISLILLE_MAP = {
+    0: 0,    # unclassified → unlabeled
+    1: 2,    # ground → road (street-level MLS on roads)
+    2: 4,    # building → building
+    3: 0,    # pole → unlabeled
+    4: 0,    # bollard → unlabeled
+    5: 0,    # trash can → unlabeled
+    6: 5,    # barrier → fence
+    7: 0,    # pedestrian → unlabeled
+    8: 7,    # car → vehicle
+    9: 6,    # natural → vegetation
+}
+
+
 def apply_map(labels, mapping):
     """Remap integer labels via a dict."""
     out = np.zeros_like(labels, dtype=np.int64)
@@ -484,6 +586,339 @@ def load_3dref(root, stride=1):
     return scans
 
 
+def _load_ply_generic(filepath):
+    """Load a PLY file and return (vertex_data, xyz, rgb, intensity)."""
+    from plyfile import PlyData
+    ply = PlyData.read(str(filepath))
+    v = ply["vertex"].data
+    xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float32)
+
+    rgb = None
+    for r_key, g_key, b_key in [("red", "green", "blue"), ("r", "g", "b")]:
+        if all(k in v.dtype.names for k in (r_key, g_key, b_key)):
+            rgb = np.stack([v[r_key], v[g_key], v[b_key]],
+                           axis=1).astype(np.float32)
+            if rgb.max() > 1.0:
+                rgb /= 255.0
+            break
+
+    intensity = None
+    for key in ("intensity", "scalar_Intensity", "Intensity", "i",
+                "reflectance", "scalar_Reflectance"):
+        if key in v.dtype.names:
+            raw = np.asarray(v[key], dtype=np.float32)
+            mx = max(float(np.nanmax(raw)), 1.0)
+            intensity = np.clip(raw / mx, 0, 1).astype(np.float32)
+            break
+
+    return v, xyz, rgb, intensity
+
+
+def load_hessigheim(root, stride=1):
+    """Load Hessigheim 3D (UAV LiDAR, German village).
+
+    H3D provides .ply files with per-point labels.
+    Structure: root/Epoch_March2018.ply (or similar filenames)
+    Labels in 'label' or 'class' or 'classification' field.
+    """
+    base = Path(root)
+    scans = []
+
+    ply_files = sorted(base.glob("*.ply"))
+    if not ply_files:
+        ply_files = sorted(base.glob("**/*.ply"))
+    ply_files = ply_files[::stride]
+    print(f"  Hessigheim: {len(ply_files)} files")
+
+    for f in ply_files:
+        try:
+            v, xyz, rgb, intensity = _load_ply_generic(f)
+            print(f"    {f.name}: {len(xyz):,} points", end="")
+
+            label_raw = None
+            for key in ("label", "class", "classification", "scalar_Label",
+                        "scalar_Classification"):
+                if key in v.dtype.names:
+                    label_raw = np.asarray(v[key], dtype=np.int64)
+                    break
+
+            if label_raw is None:
+                print(" [SKIP: no labels]")
+                continue
+
+            labels = apply_map(label_raw, HESSIGHEIM_MAP)
+            scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=intensity,
+                                    labels=labels))
+            print(f" → mapped")
+        except Exception as e:
+            print(f"    [WARN] {f.name}: {e}")
+            continue
+
+    total_pts = sum(s.xyz.shape[0] for s in scans) if scans else 0
+    print(f"  Hessigheim total: {len(scans)} scans, {total_pts:,} points")
+    return scans
+
+
+def load_semantic3d(root, stride=1):
+    """Load Semantic3D (terrestrial scanner, European villages).
+
+    Semantic3D format:
+        root/station1.txt          — space-separated: x y z intensity r g b
+        root/station1.labels       — one label per line (integer)
+    """
+    base = Path(root)
+    scans = []
+
+    # Find .txt files that have matching .labels
+    txt_files = sorted(base.glob("*.txt"))
+    pairs = []
+    for tf in txt_files:
+        lf = tf.with_suffix(".labels")
+        if lf.exists():
+            pairs.append((tf, lf))
+    pairs = pairs[::stride]
+    print(f"  Semantic3D: {len(pairs)} scan+label pairs")
+
+    for txt_path, lbl_path in pairs:
+        try:
+            print(f"    {txt_path.name}: ", end="", flush=True)
+            # Semantic3D files can be very large — use numpy for speed
+            data = np.loadtxt(str(txt_path), dtype=np.float32)
+            # columns: x, y, z, intensity, r, g, b
+            xyz = data[:, :3].astype(np.float32)
+
+            intensity = None
+            if data.shape[1] >= 4:
+                raw_i = data[:, 3]
+                mx = max(float(np.nanmax(raw_i)), 1.0)
+                intensity = np.clip(raw_i / mx, 0, 1).astype(np.float32)
+
+            rgb = None
+            if data.shape[1] >= 7:
+                rgb = data[:, 4:7].astype(np.float32)
+                if rgb.max() > 1.0:
+                    rgb /= 255.0
+
+            label_raw = np.loadtxt(str(lbl_path), dtype=np.int64)
+            if len(label_raw) != len(xyz):
+                print(f"[SKIP: label count mismatch {len(label_raw)} vs {len(xyz)}]")
+                continue
+
+            labels = apply_map(label_raw, SEMANTIC3D_MAP)
+            scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=intensity,
+                                    labels=labels))
+            print(f"{len(xyz):,} points → mapped")
+            del data
+        except Exception as e:
+            print(f"[WARN: {e}]")
+            continue
+
+    total_pts = sum(s.xyz.shape[0] for s in scans) if scans else 0
+    print(f"  Semantic3D total: {len(scans)} scans, {total_pts:,} points")
+    return scans
+
+
+def load_dales(root, stride=1):
+    """Load DALES (aerial LiDAR, urban+suburban USA).
+
+    DALES provides .ply or .las files with per-point labels.
+    Structure: root/train/*.ply and root/test/*.ply
+    PLY fields: x, y, z, (+ possibly intensity, classification/label)
+    """
+    base = Path(root)
+    scans = []
+
+    ply_files = []
+    for subdir in ["train", "test", "."]:
+        d = base / subdir if subdir != "." else base
+        found = sorted(d.glob("*.ply"))
+        ply_files.extend(found)
+    # Also try .las format
+    if not ply_files:
+        for subdir in ["train", "test", "."]:
+            d = base / subdir if subdir != "." else base
+            found = sorted(d.glob("*.las"))
+            ply_files.extend(found)
+
+    ply_files = ply_files[::stride]
+    print(f"  DALES: {len(ply_files)} files")
+
+    for f in ply_files:
+        try:
+            if f.suffix == ".las":
+                # LAS format using laspy
+                import laspy
+                las = laspy.read(str(f))
+                xyz = np.stack([las.x, las.y, las.z], axis=1).astype(np.float32)
+                intensity = None
+                if hasattr(las, 'intensity'):
+                    raw_i = np.asarray(las.intensity, dtype=np.float32)
+                    mx = max(float(raw_i.max()), 1.0)
+                    intensity = (raw_i / mx).astype(np.float32)
+                label_raw = np.asarray(las.classification, dtype=np.int64)
+                rgb = None
+                labels = apply_map(label_raw, DALES_MAP)
+                scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=intensity,
+                                        labels=labels))
+                print(f"    {f.name}: {len(xyz):,} points (LAS)")
+            else:
+                v, xyz, rgb, intensity = _load_ply_generic(f)
+                print(f"    {f.name}: {len(xyz):,} points", end="")
+
+                label_raw = None
+                for key in ("classification", "label", "class", "scalar_Label",
+                            "scalar_Classification"):
+                    if key in v.dtype.names:
+                        label_raw = np.asarray(v[key], dtype=np.int64)
+                        break
+                if label_raw is None:
+                    print(" [SKIP: no labels]")
+                    continue
+
+                labels = apply_map(label_raw, DALES_MAP)
+                scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=intensity,
+                                        labels=labels))
+                print(f" → mapped")
+        except Exception as e:
+            print(f"    [WARN] {f.name}: {e}")
+            continue
+
+    total_pts = sum(s.xyz.shape[0] for s in scans) if scans else 0
+    print(f"  DALES total: {len(scans)} scans, {total_pts:,} points")
+    return scans
+
+
+def load_vaihingen(root, stride=1):
+    """Load ISPRS Vaihingen 3D (aerial LiDAR, German suburb).
+
+    Structure: root/*.ply with per-point labels
+    9 classes: powerline, low_veg, impervious, car, fence, roof, facade, shrub, tree
+    """
+    base = Path(root)
+    scans = []
+
+    ply_files = sorted(base.glob("*.ply"))
+    if not ply_files:
+        ply_files = sorted(base.glob("**/*.ply"))
+    ply_files = ply_files[::stride]
+    print(f"  Vaihingen: {len(ply_files)} files")
+
+    for f in ply_files:
+        try:
+            v, xyz, rgb, intensity = _load_ply_generic(f)
+            print(f"    {f.name}: {len(xyz):,} points", end="")
+
+            label_raw = None
+            for key in ("label", "class", "classification", "scalar_Label"):
+                if key in v.dtype.names:
+                    label_raw = np.asarray(v[key], dtype=np.int64)
+                    break
+            if label_raw is None:
+                print(" [SKIP: no labels]")
+                continue
+
+            labels = apply_map(label_raw, VAIHINGEN_MAP)
+            scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=intensity,
+                                    labels=labels))
+            print(f" → mapped")
+        except Exception as e:
+            print(f"    [WARN] {f.name}: {e}")
+            continue
+
+    total_pts = sum(s.xyz.shape[0] for s in scans) if scans else 0
+    print(f"  Vaihingen total: {len(scans)} scans, {total_pts:,} points")
+    return scans
+
+
+def load_sensaturban(root, stride=1):
+    """Load SensatUrban (UAV photogrammetry, UK cities).
+
+    Structure: root/train/*.ply and root/test/*.ply
+    Each PLY: x, y, z, red, green, blue, label
+    13 classes (0-12).
+    """
+    base = Path(root)
+    scans = []
+
+    ply_files = []
+    for subdir in ["train", "test", "."]:
+        d = base / subdir if subdir != "." else base
+        found = sorted(d.glob("*.ply"))
+        ply_files.extend(found)
+    ply_files = ply_files[::stride]
+    print(f"  SensatUrban: {len(ply_files)} files")
+
+    for f in ply_files:
+        try:
+            v, xyz, rgb, intensity = _load_ply_generic(f)
+            print(f"    {f.name}: {len(xyz):,} points", end="")
+
+            label_raw = None
+            for key in ("label", "class", "semantic_label", "scalar_Label"):
+                if key in v.dtype.names:
+                    label_raw = np.asarray(v[key], dtype=np.int64)
+                    break
+            if label_raw is None:
+                print(" [SKIP: no labels]")
+                continue
+
+            labels = apply_map(label_raw, SENSATURBAN_MAP)
+            scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=intensity,
+                                    labels=labels))
+            print(f" → mapped")
+        except Exception as e:
+            print(f"    [WARN] {f.name}: {e}")
+            continue
+
+    total_pts = sum(s.xyz.shape[0] for s in scans) if scans else 0
+    print(f"  SensatUrban total: {len(scans)} scans, {total_pts:,} points")
+    return scans
+
+
+def load_parislille(root, stride=1):
+    """Load Paris-Lille-3D (mobile LiDAR, French cities).
+
+    Structure: root/*.ply — large PLY files with per-point labels.
+    Coarse labels (9 classes): unclassified(0), ground(1), building(2),
+    pole(3), bollard(4), trash_can(5), barrier(6), pedestrian(7),
+    car(8), natural(9).
+    """
+    base = Path(root)
+    scans = []
+
+    ply_files = sorted(base.glob("*.ply"))
+    if not ply_files:
+        ply_files = sorted(base.glob("**/*.ply"))
+    ply_files = ply_files[::stride]
+    print(f"  Paris-Lille-3D: {len(ply_files)} files")
+
+    for f in ply_files:
+        try:
+            v, xyz, rgb, intensity = _load_ply_generic(f)
+            print(f"    {f.name}: {len(xyz):,} points", end="")
+
+            label_raw = None
+            for key in ("class", "label", "classification", "scalar_Label"):
+                if key in v.dtype.names:
+                    label_raw = np.asarray(v[key], dtype=np.int64)
+                    break
+            if label_raw is None:
+                print(" [SKIP: no labels]")
+                continue
+
+            labels = apply_map(label_raw, PARISLILLE_MAP)
+            scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=intensity,
+                                    labels=labels))
+            print(f" → mapped")
+        except Exception as e:
+            print(f"    [WARN] {f.name}: {e}")
+            continue
+
+    total_pts = sum(s.xyz.shape[0] for s in scans) if scans else 0
+    print(f"  Paris-Lille-3D total: {len(scans)} scans, {total_pts:,} points")
+    return scans
+
+
 # ============================================================================
 # Dataset
 # ============================================================================
@@ -708,6 +1143,62 @@ def train(cfg):
         all_train_scans.extend(ref_scans[:split])
         if split < len(ref_scans):
             all_val_scans.extend(ref_scans[split:])
+
+    # ---- NEW DATASETS (residential/European) ----
+
+    if "hessigheim" in ds_cfg:
+        root = ds_cfg["hessigheim"]["root"]
+        h3d_stride = ds_cfg["hessigheim"].get("stride", 1)
+        h3d_scans = load_hessigheim(root, stride=h3d_stride)
+        split = int(len(h3d_scans) * 0.8)
+        all_train_scans.extend(h3d_scans[:split])
+        if split < len(h3d_scans):
+            all_val_scans.extend(h3d_scans[split:])
+
+    if "semantic3d" in ds_cfg:
+        root = ds_cfg["semantic3d"]["root"]
+        s3d_stride = ds_cfg["semantic3d"].get("stride", 1)
+        s3d_scans = load_semantic3d(root, stride=s3d_stride)
+        split = int(len(s3d_scans) * 0.8)
+        all_train_scans.extend(s3d_scans[:split])
+        if split < len(s3d_scans):
+            all_val_scans.extend(s3d_scans[split:])
+
+    if "dales" in ds_cfg:
+        root = ds_cfg["dales"]["root"]
+        dales_stride = ds_cfg["dales"].get("stride", 1)
+        dales_scans = load_dales(root, stride=dales_stride)
+        split = int(len(dales_scans) * 0.8)
+        all_train_scans.extend(dales_scans[:split])
+        if split < len(dales_scans):
+            all_val_scans.extend(dales_scans[split:])
+
+    if "vaihingen" in ds_cfg:
+        root = ds_cfg["vaihingen"]["root"]
+        vai_stride = ds_cfg["vaihingen"].get("stride", 1)
+        vai_scans = load_vaihingen(root, stride=vai_stride)
+        split = int(len(vai_scans) * 0.8)
+        all_train_scans.extend(vai_scans[:split])
+        if split < len(vai_scans):
+            all_val_scans.extend(vai_scans[split:])
+
+    if "sensaturban" in ds_cfg:
+        root = ds_cfg["sensaturban"]["root"]
+        su_stride = ds_cfg["sensaturban"].get("stride", 1)
+        su_scans = load_sensaturban(root, stride=su_stride)
+        split = int(len(su_scans) * 0.8)
+        all_train_scans.extend(su_scans[:split])
+        if split < len(su_scans):
+            all_val_scans.extend(su_scans[split:])
+
+    if "parislille" in ds_cfg:
+        root = ds_cfg["parislille"]["root"]
+        pl_stride = ds_cfg["parislille"].get("stride", 1)
+        pl_scans = load_parislille(root, stride=pl_stride)
+        split = int(len(pl_scans) * 0.8)
+        all_train_scans.extend(pl_scans[:split])
+        if split < len(pl_scans):
+            all_val_scans.extend(pl_scans[split:])
 
     if not all_train_scans:
         raise RuntimeError("No training data! Check dataset paths in config.yaml")
