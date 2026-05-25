@@ -112,7 +112,12 @@ unzip Lille2.zip
 
 **Hessigheim 3D**
 ```bash
-
+pip install laspy[lazrs]
+mkdir -p /workspace/data/Hessigheim3D
+cd /workspace/data/Hessigheim3D
+gdown "LINK_TRAIN" -O Mar19_train.laz
+gdown "LINK_VAL" -O Mar19_val.laz
+gdown "LINK_TEST" -O Mar19_test_GroundTruth.laz
 ```
 
 **SensatUrban**
