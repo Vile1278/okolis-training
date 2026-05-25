@@ -65,6 +65,65 @@ mkdir /workspace/data/Toronto_3D
 mkdir -p /workspace/data/SemanticKITTI
 ```
 
+**Semantic3D**
+```bash
+
+mkdir -p /workspace/data/Semantic3D && cd /workspace/data/Semantic3D
+
+# Training scans (svaki je .7z sa .txt + .labels)
+wget http://www.semantic3d.net/data/point-clouds/training1/bildstein_station1_xyz_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/bildstein_station3_xyz_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/bildstein_station5_xyz_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/domfountain_station1_xyz_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/domfountain_station2_xyz_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/domfountain_station3_xyz_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/neugasse_station1_xyz_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/sg27_station1_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/sg27_station2_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/sg27_station4_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/sg27_station5_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/sg27_station9_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/sg28_station4_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/untermaederbrunnen_station1_xyz_intensity_rgb.7z
+wget http://www.semantic3d.net/data/point-clouds/training1/untermaederbrunnen_station3_xyz_intensity_rgb.7z
+
+# Labeli
+wget http://www.semantic3d.net/data/sem8_labels_training.7z
+
+# Raspakiraj sve
+apt-get install -y p7zip-full
+7z x "*.7z"
+7z x sem8_labels_training.7z
+```
+
+**Paris-Lille-3D**
+```bash
+mkdir -p /workspace/data/ParisLille3D && cd /workspace/data/ParisLille3D
+
+# Sa npm3d.fr — direktni linkovi
+wget https://npm3d.fr/wp-content/uploads/2021/06/Paris.zip
+wget https://npm3d.fr/wp-content/uploads/2021/06/Lille1.zip
+wget https://npm3d.fr/wp-content/uploads/2021/06/Lille2.zip
+
+unzip Paris.zip
+unzip Lille1.zip
+unzip Lille2.zip
+```
+
+**Hessigheim 3D**
+```bash
+
+```
+
+**SensatUrban**
+```bash
+mkdir -p /workspace/data/SensatUrban && cd /workspace/data/SensatUrban
+pip install gdown
+gdown "https://drive.google.com/drive/folders/1xd6oc0yJFQ74r54zVJCTGypohvv7ajXG?usp=sharing" -O sensaturban.zip
+unzip sensaturban.zip
+```
+
+
 **Pandaset**
 ```bash
 cd /workspace/data
