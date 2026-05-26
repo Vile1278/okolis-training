@@ -48,16 +48,22 @@ ptv3:
   drop: 0.1                          # dropout (mild regularization)
 
 # ── Training ─────────────────────────────────────────────────────────────
-crop_points: 32768       # PTv3 uses more memory than RandLA → smaller crop
+# Prošli trening (3 dataseta): peak mIoU=0.5648 @ epoch 55, stagnacija do 200.
+# Sad imamo 7 dataseta — više raznolikosti, treba više koraka ali manje epoha.
+
+crop_points: 65536       # 64K — veći crop za bolje lokalne kontekste
+                         # A6000 48GB drži batch=4 × 64K
 voxel: 0.02
 augment: true
 modality_dropout: true
-steps_per_epoch: 1000
+steps_per_epoch: 1500    # 1500 — više koraka jer 7 dataseta (bilo 1000 za 3)
 
-batch_size: 4            # PTv3 on 48GB VRAM — ~35-38GB usage
+batch_size: 4            # 4 × 64K pts = ~40GB VRAM (sigurno za A6000)
 num_classes: 8
 in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
-lr: 0.0006               # lower LR for transformers (AdamW)
-epochs: 200              # more epochs — PTv3 converges slower but higher
-out_dir: /workspace/runs/ptv3_a6000
+lr: 0.0004               # malo niži LR — 7 dataseta = šumovitiji gradijenti
+                         # cosine decay do 1e-6
+epochs: 150              # manje epoha jer je steps_per_epoch veći
+                         # ukupno koraka: 150×1500 = 225K (prije 200×1000 = 200K)
+out_dir: /workspace/runs/ptv3_7ds
 num_workers: 8

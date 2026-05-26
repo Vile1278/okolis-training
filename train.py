@@ -1001,16 +1001,22 @@ def load_parislille(root, stride=1):
 # ============================================================================
 
 class PointCloudTileDataset(Dataset):
-    """Serves random crops from pre-loaded scans."""
+    """Serves random crops from pre-loaded scans.
+
+    If scan_datasets is provided, tracks which dataset each scan came from
+    and returns dataset_id alongside xyz/feats/labels for per-dataset metrics.
+    """
 
     def __init__(self, scans, crop_points=131072, voxel=0.02,
-                 augment=True, do_mod_drop=True, steps_per_epoch=1000):
+                 augment=True, do_mod_drop=True, steps_per_epoch=1000,
+                 scan_datasets=None):
         self.scans = scans
         self.crop = crop_points
         self.voxel = voxel
         self.augment = augment
         self.do_mod_drop = do_mod_drop
         self.steps = steps_per_epoch
+        self.scan_datasets = scan_datasets  # list[str], same len as scans
 
         # Precompute HAG and features for each scan
         print(f"  Precomputing features for {len(scans)} scans...")
@@ -1048,9 +1054,15 @@ class PointCloudTileDataset(Dataset):
         if self.do_mod_drop:
             feats = modality_dropout(feats)
 
+        # Dataset ID for per-dataset tracking
+        ds_id = 0
+        if self.scan_datasets is not None:
+            ds_id = self.scan_datasets[si]
+
         return (torch.from_numpy(xyz).float(),
                 torch.from_numpy(feats).float(),
-                torch.from_numpy(labels).long())
+                torch.from_numpy(labels).long(),
+                ds_id)
 
     def _voxel_ds(self, xyz, feats, labels):
         v = self.voxel
@@ -1113,7 +1125,8 @@ def collate_fn(batch):
     feats = torch.stack([b[1] for b in batch])
     labels = torch.stack([b[2] for b in batch])
     feats = torch.nan_to_num(feats, nan=0.0)
-    return xyz, feats, labels
+    ds_ids = [b[3] for b in batch]  # list of dataset IDs (int)
+    return xyz, feats, labels, ds_ids
 
 
 # ============================================================================
@@ -1126,7 +1139,7 @@ def evaluate(model, loader, num_classes, device):
     inter = torch.zeros(num_classes)
     union = torch.zeros(num_classes)
 
-    for xyz, feats, labels in loader:
+    for xyz, feats, labels, _ds_ids in loader:
         xyz = xyz.to(device)
         feats = feats.to(device)
         labels = labels.to(device)
@@ -1168,28 +1181,36 @@ def train(cfg):
     steps = cfg.get("steps_per_epoch", 1000)
     num_workers = cfg.get("num_workers", 8)
 
-    # ---- Load datasets ----
+    # ---- Load datasets (with per-dataset tracking) ----
     print("\n=== Loading datasets ===")
     all_train_scans = []
     all_val_scans = []
+    train_ds_ids = []       # parallel list: dataset ID per train scan
+    ds_names = []           # ordered list of dataset names
     ds_cfg = cfg.get("datasets", {})
+
+    def _add_train(scans, ds_name):
+        """Register train scans with dataset tracking."""
+        if ds_name not in ds_names:
+            ds_names.append(ds_name)
+        ds_id = ds_names.index(ds_name)
+        all_train_scans.extend(scans)
+        train_ds_ids.extend([ds_id] * len(scans))
 
     if "toronto3d" in ds_cfg:
         root = ds_cfg["toronto3d"]["root"]
         scans = load_toronto3d(root)
         if scans:
-            # L001, L003 = train; L004 = val; L002 = test (skip)
             for s_idx, s in enumerate(scans):
                 ply_files = sorted(Path(root).glob("L00*.ply"))
                 if s_idx < len(ply_files):
                     name = ply_files[s_idx].stem
                     if name in ("L001", "L003"):
-                        all_train_scans.append(s)
+                        _add_train([s], "toronto3d")
                     elif name == "L004":
                         all_val_scans.append(s)
-                    # L002 = test, skip
                 else:
-                    all_train_scans.append(s)
+                    _add_train([s], "toronto3d")
 
     if "semantickitti" in ds_cfg:
         root = ds_cfg["semantickitti"]["root"]
@@ -1199,16 +1220,15 @@ def train(cfg):
             stride=stride)
         val_scans = load_semantickitti(root, train_sequences=["08"],
             stride=stride)
-        all_train_scans.extend(train_scans)
+        _add_train(train_scans, "semantickitti")
         all_val_scans.extend(val_scans)
 
     if "pandaset" in ds_cfg:
         root = ds_cfg["pandaset"]["root"]
         ps_stride = ds_cfg["pandaset"].get("stride", 5)
         ps_scans = load_pandaset(root, stride=ps_stride)
-        # Use 80/20 split: first 80% train, last 20% val
         split = int(len(ps_scans) * 0.8)
-        all_train_scans.extend(ps_scans[:split])
+        _add_train(ps_scans[:split], "pandaset")
         if split < len(ps_scans):
             all_val_scans.extend(ps_scans[split:])
 
@@ -1217,7 +1237,7 @@ def train(cfg):
         ref_stride = ds_cfg["3dref"].get("stride", 1)
         ref_scans = load_3dref(root, stride=ref_stride)
         split = int(len(ref_scans) * 0.8)
-        all_train_scans.extend(ref_scans[:split])
+        _add_train(ref_scans[:split], "3dref")
         if split < len(ref_scans):
             all_val_scans.extend(ref_scans[split:])
 
@@ -1225,10 +1245,9 @@ def train(cfg):
 
     if "hessigheim" in ds_cfg:
         root = ds_cfg["hessigheim"]["root"]
-        # H3D has pre-defined train/val/test splits
         h3d_train = load_hessigheim(root, split="train")
         h3d_val = load_hessigheim(root, split="val")
-        all_train_scans.extend(h3d_train)
+        _add_train(h3d_train, "hessigheim")
         all_val_scans.extend(h3d_val)
 
     if "semantic3d" in ds_cfg:
@@ -1236,7 +1255,7 @@ def train(cfg):
         s3d_stride = ds_cfg["semantic3d"].get("stride", 1)
         s3d_scans = load_semantic3d(root, stride=s3d_stride)
         split = int(len(s3d_scans) * 0.8)
-        all_train_scans.extend(s3d_scans[:split])
+        _add_train(s3d_scans[:split], "semantic3d")
         if split < len(s3d_scans):
             all_val_scans.extend(s3d_scans[split:])
 
@@ -1245,7 +1264,7 @@ def train(cfg):
         dales_stride = ds_cfg["dales"].get("stride", 1)
         dales_scans = load_dales(root, stride=dales_stride)
         split = int(len(dales_scans) * 0.8)
-        all_train_scans.extend(dales_scans[:split])
+        _add_train(dales_scans[:split], "dales")
         if split < len(dales_scans):
             all_val_scans.extend(dales_scans[split:])
 
@@ -1254,7 +1273,7 @@ def train(cfg):
         vai_stride = ds_cfg["vaihingen"].get("stride", 1)
         vai_scans = load_vaihingen(root, stride=vai_stride)
         split = int(len(vai_scans) * 0.8)
-        all_train_scans.extend(vai_scans[:split])
+        _add_train(vai_scans[:split], "vaihingen")
         if split < len(vai_scans):
             all_val_scans.extend(vai_scans[split:])
 
@@ -1263,7 +1282,7 @@ def train(cfg):
         su_stride = ds_cfg["sensaturban"].get("stride", 1)
         su_scans = load_sensaturban(root, stride=su_stride)
         split = int(len(su_scans) * 0.8)
-        all_train_scans.extend(su_scans[:split])
+        _add_train(su_scans[:split], "sensaturban")
         if split < len(su_scans):
             all_val_scans.extend(su_scans[split:])
 
@@ -1272,19 +1291,31 @@ def train(cfg):
         pl_stride = ds_cfg["parislille"].get("stride", 1)
         pl_scans = load_parislille(root, stride=pl_stride)
         split = int(len(pl_scans) * 0.8)
-        all_train_scans.extend(pl_scans[:split])
+        _add_train(pl_scans[:split], "parislille")
         if split < len(pl_scans):
             all_val_scans.extend(pl_scans[split:])
 
     if not all_train_scans:
         raise RuntimeError("No training data! Check dataset paths in config.yaml")
 
-    print(f"\nTotal: {len(all_train_scans)} train scans, {len(all_val_scans)} val scans")
+    # Print per-dataset summary
+    print(f"\n{'='*50}")
+    print(f"{'Dataset':<15} {'Train scans':>12} {'%':>6}")
+    print(f"{'-'*50}")
+    for di, dname in enumerate(ds_names):
+        count = train_ds_ids.count(di)
+        pct = 100 * count / len(all_train_scans)
+        print(f"  {dname:<13} {count:>10,}  {pct:>5.1f}%")
+    print(f"{'-'*50}")
+    print(f"  {'TOTAL':<13} {len(all_train_scans):>10,}  100.0%")
+    print(f"  Val scans: {len(all_val_scans):,}")
+    print(f"{'='*50}\n")
 
     # ---- Datasets (precompute features, then free raw scans) ----
     train_ds = PointCloudTileDataset(
         all_train_scans, crop_points=crop, voxel=voxel,
-        augment=True, do_mod_drop=True, steps_per_epoch=steps)
+        augment=True, do_mod_drop=True, steps_per_epoch=steps,
+        scan_datasets=train_ds_ids)
     val_ds = PointCloudTileDataset(
         all_val_scans if all_val_scans else all_train_scans[:1],
         crop_points=crop, voxel=voxel,
@@ -1326,14 +1357,19 @@ def train(cfg):
 
     # ---- Train ----
     best_miou = 0.0
-    print(f"\n=== Training: {epochs} epochs, {steps} steps/epoch, batch={batch_size} ===\n")
+    n_datasets = len(ds_names)
+    print(f"\n=== Training: {epochs} epochs, {steps} steps/epoch, batch={batch_size} ===")
+    print(f"    Tracking loss for {n_datasets} datasets: {', '.join(ds_names)}\n")
 
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0.0
+        # Per-dataset loss tracking
+        ds_loss_sum = [0.0] * n_datasets
+        ds_loss_cnt = [0] * n_datasets
         t0 = time.time()
 
-        for step, (xyz, feats, labels) in enumerate(train_loader):
+        for step, (xyz, feats, labels, ds_ids) in enumerate(train_loader):
             xyz = xyz.to(device, non_blocking=True)
             feats = feats.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -1351,11 +1387,19 @@ def train(cfg):
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             scaler.step(optimizer)
             scaler.update()
-            total_loss += loss.item()
+
+            loss_val = loss.item()
+            total_loss += loss_val
+
+            # Track per-dataset loss (each batch sample may be from different dataset)
+            for did in ds_ids:
+                if 0 <= did < n_datasets:
+                    ds_loss_sum[did] += loss_val
+                    ds_loss_cnt[did] += 1
 
             if (step + 1) % 100 == 0:
                 print(f"  epoch {epoch} step {step+1}/{len(train_loader)} "
-                      f"loss={loss.item():.4f}")
+                      f"loss={loss_val:.4f}")
 
         scheduler.step()
         avg_loss = total_loss / max(len(train_loader), 1)
@@ -1372,6 +1416,24 @@ def train(cfg):
               f"lr={optimizer.param_groups[0]['lr']:.6f}  time={elapsed:.0f}s")
         if iou_str:
             print(f"  per-class: {iou_str}")
+
+        # Per-dataset loss report (every 10 epochs)
+        if epoch % 10 == 0 or epoch == 1:
+            print(f"  ── per-dataset loss ──")
+            ds_losses = []
+            for di in range(n_datasets):
+                if ds_loss_cnt[di] > 0:
+                    avg = ds_loss_sum[di] / ds_loss_cnt[di]
+                    ds_losses.append((ds_names[di], avg, ds_loss_cnt[di]))
+                else:
+                    ds_losses.append((ds_names[di], 0.0, 0))
+            # Sort by loss descending (hardest first)
+            ds_losses.sort(key=lambda x: -x[1])
+            for dname, dloss, dcnt in ds_losses:
+                bar = "█" * min(30, int(dloss * 15))
+                status = "◀ hardest" if dloss == ds_losses[0][1] and dloss > 0 else ""
+                print(f"    {dname:<14} loss={dloss:.4f}  samples={dcnt:>5}  "
+                      f"{bar} {status}")
 
         # Save
         ckpt = {
