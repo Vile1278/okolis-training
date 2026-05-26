@@ -74,31 +74,34 @@ mkdir -p /workspace/data/SemanticKITTI
 
 mkdir -p /workspace/data/Semantic3D && cd /workspace/data/Semantic3D
 
-# Training scans (svaki je .7z sa .txt + .labels)
-wget http://www.semantic3d.net/data/point-clouds/training1/bildstein_station1_xyz_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/bildstein_station3_xyz_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/bildstein_station5_xyz_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/domfountain_station1_xyz_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/domfountain_station2_xyz_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/domfountain_station3_xyz_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/neugasse_station1_xyz_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/sg27_station1_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/sg27_station2_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/sg27_station4_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/sg27_station5_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/sg27_station9_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/sg28_station4_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/untermaederbrunnen_station1_xyz_intensity_rgb.7z
-wget http://www.semantic3d.net/data/point-clouds/training1/untermaederbrunnen_station3_xyz_intensity_rgb.7z
+# Training point clouds (~12 GB komprimirano)
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/bildstein_station1_xyz_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/bildstein_station3_xyz_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/bildstein_station5_xyz_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/domfountain_station1_xyz_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/domfountain_station2_xyz_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/domfountain_station3_xyz_intensity_rgb.7z &
+wait
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/neugasse_station1_xyz_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg27_station1_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg27_station2_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg27_station4_intensity_rgb.7z &
+wait
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg27_station5_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg27_station9_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg28_station4_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/untermaederbrunnen_station1_xyz_intensity_rgb.7z &
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/untermaederbrunnen_station3_xyz_intensity_rgb.7z &
+wait
 
 # Labeli
-wget http://www.semantic3d.net/data/sem8_labels_training.7z
+wget https://share.phys.ethz.ch/~pf/semantic3d/data/sem8_labels_training.7z
 
-# Raspakiraj sve
-apt-get install -y p7zip-full
-7z x "*.7z"
-7z x sem8_labels_training.7z
-rm *.7z
+# Raspakiraj sve i očisti
+apt-get update && apt-get install -y p7zip-full
+for f in *.7z; do 7z x "$f" && rm "$f"; done
+
+echo "DONE — $(ls *.txt | wc -l) txt files, $(du -sh . | cut -f1) total"
 ```
 
 **Paris-Lille-3D**
