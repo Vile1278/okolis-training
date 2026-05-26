@@ -102,6 +102,11 @@ apt-get update && apt-get install -y p7zip-full
 for f in *.7z; do 7z x "$f" && rm "$f"; done
 
 echo "DONE — $(ls *.txt | wc -l) txt files, $(du -sh . | cut -f1) total"
+
+cd /workspace/data/Semantic3D && rm -f wget-log*
+ls -la *.txt | wc -l
+ls -la *.labels | wc -l
+du -sh .
 ```
 
 **Paris-Lille-3D**
