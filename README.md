@@ -1,7 +1,7 @@
 # Okoliš AI — PTv3
 
 Standalone trening za 8-klasnu semantičku segmentaciju point cloudova.
-Koristi Toronto3D + SemanticKITTI datasete.
+Koristi Toronto3D + SemanticKITTI + Pandaset + Hessigheim3D + Semantic3D + SensatUrban + Paris-Lille-3D datasete.
 
 ## Klase (8)
 
@@ -52,7 +52,11 @@ cd okolis-training
 
 **Kaggle** 
 ```bash
-pip install kaggle
+pip install kaggle gdown laspy[lazrs]
+```
+
+**Kaggle** 
+```bash
 mkdir /root/.kaggle
 echo '{"username":"TVOJ_USERNAME","key":"TVOJ_KEY"}' > /root/.kaggle/kaggle.json
 chmod 600 /root/.kaggle/kaggle.json
@@ -94,6 +98,7 @@ wget http://www.semantic3d.net/data/sem8_labels_training.7z
 apt-get install -y p7zip-full
 7z x "*.7z"
 7z x sem8_labels_training.7z
+rm *.7z
 ```
 
 **Paris-Lille-3D**
@@ -108,6 +113,7 @@ wget https://npm3d.fr/wp-content/uploads/2021/06/Lille2.zip
 unzip Paris.zip
 unzip Lille1.zip
 unzip Lille2.zip
+rm *.zip
 ```
 
 **Hessigheim 3D**
@@ -123,8 +129,7 @@ gdown "LINK_TEST" -O Mar19_test_GroundTruth.laz
 **SensatUrban**
 ```bash
 mkdir -p /workspace/data/SensatUrban && cd /workspace/data/SensatUrban
-pip install gdown
-gdown "https://drive.google.com/drive/folders/1xd6oc0yJFQ74r54zVJCTGypohvv7ajXG?usp=sharing" -O sensaturban.zip
+gdown --folder "https://drive.google.com/drive/folders/1xd6oc0yJFQ74r54zVJCTGypohvv7ajXG"
 unzip sensaturban.zip
 ```
 
@@ -186,16 +191,16 @@ python train.py --config config.yaml
 
 Ključni parametri u `config.yaml`:
 
-- `batch_size: 16` — optimalno za 48 GB VRAM
-- `crop_points: 131072` — 128K točaka po uzorku
+- `batch_size: 4` — optimalno za 48 GB VRAM
+- `crop_points: 65536` — 65K točaka po uzorku
 - `voxel: 0.02` — voxel veličina za downsample
 - `kitti_scan_stride: 5` — učitava svaki 5. KITTI sken (štedi RAM)
 - `epochs: 150` — ukupno epoha
-- `lr: 0.002` — AdamW learning rate sa cosine decay
+- `lr: 0.0004` — AdamW learning rate sa cosine decay
 
 ## Izlaz
 
-Modeli se spremaju u `/workspace/runs/rtx_a6000/`:
+Modeli se spremaju u `/workspace/runs/ptv3_a6000/`:
 - `last.pt` — zadnji checkpoint
 - `best.pt` — checkpoint sa najboljim mIoU
 
