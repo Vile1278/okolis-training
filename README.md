@@ -112,15 +112,8 @@ du -sh .
 **Paris-Lille-3D**
 ```bash
 mkdir -p /workspace/data/ParisLille3D && cd /workspace/data/ParisLille3D
-
-# Sa npm3d.fr — direktni linkovi
-wget https://npm3d.fr/wp-content/uploads/2021/06/Paris.zip
-wget https://npm3d.fr/wp-content/uploads/2021/06/Lille1.zip
-wget https://npm3d.fr/wp-content/uploads/2021/06/Lille2.zip
-
-unzip Paris.zip
-unzip Lille1.zip
-unzip Lille2.zip
+gdown "TVOJ_GOOGLE_DRIVE_LINK" -O ParisLille3D.zip
+unzip ParisLille3D.zip && rm ParisLille3D.zip
 rm *.zip
 ```
 
