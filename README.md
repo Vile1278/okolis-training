@@ -65,8 +65,6 @@ chmod 600 /root/.kaggle/kaggle.json
 **data dir** 
 ```bash
 mkdir /workspace/data
-mkdir /workspace/data/Toronto_3D
-mkdir -p /workspace/data/SemanticKITTI
 ```
 
 **Semantic3D**
@@ -119,7 +117,6 @@ rm *.zip
 
 **Hessigheim 3D**
 ```bash
-pip install laspy[lazrs]
 mkdir -p /workspace/data/Hessigheim3D
 cd /workspace/data/Hessigheim3D
 gdown "LINK_TRAIN" -O Mar19_train.laz
@@ -143,7 +140,7 @@ kaggle datasets download -d usharengaraju/pandaset-dataset --unzip -p Pandaset
 
 **Toronto3D** (slobodan pristup):
 ```bash
-export KAGGLE_API_TOKEN="kaggle api"
+mkdir /workspace/data/Toronto_3D
 cd /workspace/data/Toronto_3D
 kaggle datasets download -d priteshraj10/point-cloud-lidar-toronto-3d
 python -c "import zipfile; zipfile.ZipFile('point-cloud-lidar-toronto-3d.zip').extractall('.')"
@@ -152,6 +149,7 @@ ls *.ply
 
 **SemanticKITTI**:
 ```bash
+mkdir -p /workspace/data/SemanticKITTI
 cd /workspace/data/SemanticKITTI
 wget "https://s3.eu-central-1.amazonaws.com/avg-kitti/data_odometry_velodyne.zip" -O velodyne.zip
 wget "https://www.semantic-kitti.org/assets/data_odometry_labels.zip" -O labels.zip
