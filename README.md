@@ -44,7 +44,7 @@ pip install plyfile pyyaml scipy
 
 ```bash
 cd /workspace
-git clone https://github.com/TVOJ_USERNAME/okolis-training.git
+git clone https://github.com/Vile1278/okolis-training.git
 cd okolis-training
 ```
 
