@@ -38,6 +38,7 @@ Koristi Toronto3D + SemanticKITTI + Pandaset + Hessigheim3D + Semantic3D + Sensa
 
 ```bash
 pip install plyfile pyyaml scipy
+apt-get install -y unzip
 ```
 
 ### 4. Klonirati repo
