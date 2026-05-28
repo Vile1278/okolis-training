@@ -946,10 +946,19 @@ def load_sensaturban(root, stride=1):
     scans = []
 
     ply_files = []
+    # Search common structures: root/train/, root/test/, root/,
+    # and deeper: root/**/train/, root/**/test/ (e.g. SensatUrban_Dataset/ply/train/)
     for subdir in ["train", "test", "."]:
         d = base / subdir if subdir != "." else base
         found = sorted(d.glob("*.ply"))
         ply_files.extend(found)
+    if not ply_files:
+        # Try deeper search: root/**/train/*.ply, root/**/test/*.ply
+        for pattern in ["**/train/*.ply", "**/test/*.ply", "**/*.ply"]:
+            found = sorted(base.glob(pattern))
+            ply_files.extend(found)
+        # Deduplicate
+        ply_files = list(dict.fromkeys(ply_files))
     ply_files = ply_files[::stride]
     print(f"  SensatUrban: {len(ply_files)} files")
 
@@ -1093,7 +1102,8 @@ class PointCloudTileDataset(Dataset):
 
     def __init__(self, scan_paths, crop_points=131072, voxel=0.02,
                  augment=True, do_mod_drop=True, steps_per_epoch=1000,
-                 scan_datasets=None, cache_size=50):
+                 scan_datasets=None, cache_size=50,
+                 dataset_weights=None, ds_names=None):
         self.scan_paths = scan_paths       # list of Path to .npz files
         self.crop = crop_points
         self.voxel = voxel
@@ -1106,6 +1116,34 @@ class PointCloudTileDataset(Dataset):
         # LRU cache: {scan_index: (xyz, feats, labels)}
         self._cache = {}
         self._cache_order = []  # oldest first
+
+        # Weighted sampling: each scan gets a probability proportional to
+        # its dataset weight, divided by the number of scans in that dataset.
+        # This ensures small datasets (Hessigheim=1 scan) get fair representation.
+        self._scan_probs = None
+        if scan_datasets is not None and dataset_weights is not None:
+            probs = np.zeros(len(scan_paths), dtype=np.float64)
+            for i, ds_id in enumerate(scan_datasets):
+                w = dataset_weights.get(ds_id, 1.0)
+                probs[i] = w
+            # Normalize per-dataset: divide each scan's weight by count in its dataset
+            for ds_id in set(scan_datasets):
+                mask = np.array([d == ds_id for d in scan_datasets])
+                count = mask.sum()
+                if count > 0:
+                    probs[mask] /= count
+            # Normalize to sum=1
+            probs /= probs.sum()
+            self._scan_probs = probs
+
+            # Print expected sampling rates
+            if ds_names:
+                print(f"  Weighted sampling:")
+                for ds_id in sorted(set(scan_datasets)):
+                    mask = np.array([d == ds_id for d in scan_datasets])
+                    total_p = probs[mask].sum() * 100
+                    name = ds_names[ds_id] if ds_id < len(ds_names) else f"ds{ds_id}"
+                    print(f"    {name:<15} {total_p:5.1f}% of batches")
 
         print(f"  LazyDataset: {len(scan_paths)} scans, "
               f"cache={cache_size}, crop={crop_points}")
@@ -1138,7 +1176,10 @@ class PointCloudTileDataset(Dataset):
 
     def __getitem__(self, idx):
         # Random scan
-        si = np.random.randint(len(self.scan_paths))
+        if self._scan_probs is not None:
+            si = np.random.choice(len(self.scan_paths), p=self._scan_probs)
+        else:
+            si = np.random.randint(len(self.scan_paths))
         xyz, feats, labels = self._load_scan(si)
 
         # Voxel downsample
@@ -1460,10 +1501,17 @@ def train(cfg):
     print(f"{'='*50}\n")
 
     # ---- Datasets (lazy loading from disk cache) ----
+    # Build dataset_weights dict: {ds_id: weight} from config
+    dataset_weights = {}
+    ds_cfgs = cfg.get("datasets", {})
+    for di, dname in enumerate(ds_names):
+        dataset_weights[di] = ds_cfgs.get(dname, {}).get("weight", 1.0)
+
     train_ds = PointCloudTileDataset(
         train_npz_paths, crop_points=crop, voxel=voxel,
         augment=True, do_mod_drop=True, steps_per_epoch=steps,
-        scan_datasets=train_ds_ids, cache_size=50)
+        scan_datasets=train_ds_ids, cache_size=50,
+        dataset_weights=dataset_weights, ds_names=ds_names)
     val_ds = PointCloudTileDataset(
         val_npz_paths if val_npz_paths else train_npz_paths[:1],
         crop_points=crop, voxel=voxel,
