@@ -158,27 +158,6 @@ python -c "import zipfile; zipfile.ZipFile('labels.zip').extractall('.')"
 ```
 
 
-provjera strukture:
-```bash
-ls dataset/sequences/00/velodyne/ | head -3
-ls dataset/sequences/00/labels/ | head -3
-```
-
-
-Očekivana struktura:
-```
-/workspace/data/SemanticKITTI/dataset/sequences/
-├── 00/
-│   ├── velodyne/
-│   │   ├── 000000.bin
-│   │   └── ...
-│   └── labels/
-│       ├── 000000.label
-│       └── ...
-├── 01/
-└── ...
-```
-
 ### 6. Pokrenuti trening
 
 ```bash
