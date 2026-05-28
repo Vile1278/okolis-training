@@ -997,45 +997,102 @@ def load_parislille(root, stride=1):
 
 
 # ============================================================================
-# Dataset
+# Scan Cache — preprocess to disk, load lazily
+# ============================================================================
+
+def preprocess_to_cache(scans, cache_dir, start_idx=0):
+    """Precompute HAG+features for each scan, save as .npz, return count.
+
+    Each scan is saved as cache_dir/scan_{idx:06d}.npz with keys:
+      xyz (N,3), feats (N,5), labels (N,)
+    After saving, the scan data is freed from memory.
+    Returns the number of scans saved.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    saved = 0
+    for i, scan in enumerate(scans):
+        idx = start_idx + i
+        out_path = cache_dir / f"scan_{idx:06d}.npz"
+        if out_path.exists():
+            saved += 1
+            continue
+        try:
+            hag = height_above_ground_from_labels(scan.xyz, scan.labels)
+            feats = pack_features(scan.rgb, scan.intensity, hag)
+            np.savez_compressed(out_path,
+                                xyz=scan.xyz.astype(np.float32),
+                                feats=feats.astype(np.float32),
+                                labels=scan.labels.astype(np.int64))
+            saved += 1
+        except Exception as e:
+            print(f"    [WARN] cache scan {idx}: {e}")
+    return saved
+
+
+# ============================================================================
+# Dataset — lazy loading with LRU cache
 # ============================================================================
 
 class PointCloudTileDataset(Dataset):
-    """Serves random crops from pre-loaded scans.
+    """Serves random crops from cached scans on disk.
+
+    Scans are loaded lazily from .npz files with an LRU cache to limit
+    RAM usage. This allows training on datasets that don't fit in memory.
 
     If scan_datasets is provided, tracks which dataset each scan came from
     and returns dataset_id alongside xyz/feats/labels for per-dataset metrics.
     """
 
-    def __init__(self, scans, crop_points=131072, voxel=0.02,
+    def __init__(self, scan_paths, crop_points=131072, voxel=0.02,
                  augment=True, do_mod_drop=True, steps_per_epoch=1000,
-                 scan_datasets=None):
-        self.scans = scans
+                 scan_datasets=None, cache_size=50):
+        self.scan_paths = scan_paths       # list of Path to .npz files
         self.crop = crop_points
         self.voxel = voxel
         self.augment = augment
         self.do_mod_drop = do_mod_drop
         self.steps = steps_per_epoch
-        self.scan_datasets = scan_datasets  # list[str], same len as scans
+        self.scan_datasets = scan_datasets  # list[int], same len as scan_paths
+        self.cache_size = cache_size
 
-        # Precompute HAG and features for each scan
-        print(f"  Precomputing features for {len(scans)} scans...")
-        self.prepared = []
-        for i, scan in enumerate(scans):
-            if (i + 1) % 500 == 0:
-                print(f"    {i+1}/{len(scans)}")
-            hag = height_above_ground_from_labels(scan.xyz, scan.labels)
-            feats = pack_features(scan.rgb, scan.intensity, hag)
-            self.prepared.append((scan.xyz.copy(), feats, scan.labels.copy()))
-        print(f"  Done precomputing.")
+        # LRU cache: {scan_index: (xyz, feats, labels)}
+        self._cache = {}
+        self._cache_order = []  # oldest first
+
+        print(f"  LazyDataset: {len(scan_paths)} scans, "
+              f"cache={cache_size}, crop={crop_points}")
+
+    def _load_scan(self, si):
+        """Load scan from cache or disk."""
+        if si in self._cache:
+            # Move to end (most recently used)
+            self._cache_order.remove(si)
+            self._cache_order.append(si)
+            return self._cache[si]
+
+        # Load from disk
+        data = np.load(self.scan_paths[si])
+        entry = (data["xyz"], data["feats"], data["labels"])
+
+        # Add to cache
+        self._cache[si] = entry
+        self._cache_order.append(si)
+
+        # Evict oldest if over limit
+        while len(self._cache) > self.cache_size:
+            old = self._cache_order.pop(0)
+            del self._cache[old]
+
+        return entry
 
     def __len__(self):
         return self.steps
 
     def __getitem__(self, idx):
         # Random scan
-        si = np.random.randint(len(self.prepared))
-        xyz, feats, labels = self.prepared[si]
+        si = np.random.randint(len(self.scan_paths))
+        xyz, feats, labels = self._load_scan(si)
 
         # Voxel downsample
         xyz, feats, labels = self._voxel_ds(xyz, feats, labels)
@@ -1181,36 +1238,75 @@ def train(cfg):
     steps = cfg.get("steps_per_epoch", 1000)
     num_workers = cfg.get("num_workers", 8)
 
-    # ---- Load datasets (with per-dataset tracking) ----
-    print("\n=== Loading datasets ===")
-    all_train_scans = []
-    all_val_scans = []
+    # ---- Load datasets one-by-one, cache to disk, free RAM ----
+    print("\n=== Loading datasets (disk-cached, lazy) ===")
+    cache_dir = out_dir / "scan_cache"
+    train_cache = cache_dir / "train"
+    val_cache = cache_dir / "val"
+    train_cache.mkdir(parents=True, exist_ok=True)
+    val_cache.mkdir(parents=True, exist_ok=True)
+
+    train_npz_paths = []
+    val_npz_paths = []
     train_ds_ids = []       # parallel list: dataset ID per train scan
     ds_names = []           # ordered list of dataset names
     ds_cfg = cfg.get("datasets", {})
 
-    def _add_train(scans, ds_name):
-        """Register train scans with dataset tracking."""
+    train_offset = 0  # global scan index for cache naming
+    val_offset = 0
+
+    def _cache_train(scans, ds_name):
+        """Preprocess+cache train scans, track dataset, free RAM."""
+        nonlocal train_offset
+        if not scans:
+            return
         if ds_name not in ds_names:
             ds_names.append(ds_name)
         ds_id = ds_names.index(ds_name)
-        all_train_scans.extend(scans)
-        train_ds_ids.extend([ds_id] * len(scans))
+        n = preprocess_to_cache(scans, train_cache, start_idx=train_offset)
+        for i in range(n):
+            p = train_cache / f"scan_{train_offset + i:06d}.npz"
+            if p.exists():
+                train_npz_paths.append(p)
+                train_ds_ids.append(ds_id)
+        train_offset += len(scans)
+        print(f"    → cached {n} train scans, RAM freed")
+
+    def _cache_val(scans):
+        """Preprocess+cache val scans, free RAM."""
+        nonlocal val_offset
+        if not scans:
+            return
+        n = preprocess_to_cache(scans, val_cache, start_idx=val_offset)
+        for i in range(n):
+            p = val_cache / f"scan_{val_offset + i:06d}.npz"
+            if p.exists():
+                val_npz_paths.append(p)
+        val_offset += len(scans)
+
+    import gc
 
     if "toronto3d" in ds_cfg:
         root = ds_cfg["toronto3d"]["root"]
         scans = load_toronto3d(root)
         if scans:
+            train_batch = []
+            val_batch = []
+            ply_files = sorted(Path(root).glob("L00*.ply"))
             for s_idx, s in enumerate(scans):
-                ply_files = sorted(Path(root).glob("L00*.ply"))
                 if s_idx < len(ply_files):
                     name = ply_files[s_idx].stem
                     if name in ("L001", "L003"):
-                        _add_train([s], "toronto3d")
+                        train_batch.append(s)
                     elif name == "L004":
-                        all_val_scans.append(s)
+                        val_batch.append(s)
+                    else:
+                        train_batch.append(s)
                 else:
-                    _add_train([s], "toronto3d")
+                    train_batch.append(s)
+            _cache_train(train_batch, "toronto3d")
+            _cache_val(val_batch)
+            del scans, train_batch, val_batch; gc.collect()
 
     if "semantickitti" in ds_cfg:
         root = ds_cfg["semantickitti"]["root"]
@@ -1218,84 +1314,88 @@ def train(cfg):
         train_scans = load_semantickitti(root, train_sequences=[
             "00", "01", "02", "03", "04", "05", "06", "07", "09", "10"],
             stride=stride)
+        _cache_train(train_scans, "semantickitti")
+        del train_scans; gc.collect()
         val_scans = load_semantickitti(root, train_sequences=["08"],
             stride=stride)
-        _add_train(train_scans, "semantickitti")
-        all_val_scans.extend(val_scans)
+        _cache_val(val_scans)
+        del val_scans; gc.collect()
 
     if "pandaset" in ds_cfg:
         root = ds_cfg["pandaset"]["root"]
         ps_stride = ds_cfg["pandaset"].get("stride", 5)
         ps_scans = load_pandaset(root, stride=ps_stride)
         split = int(len(ps_scans) * 0.8)
-        _add_train(ps_scans[:split], "pandaset")
-        if split < len(ps_scans):
-            all_val_scans.extend(ps_scans[split:])
+        _cache_train(ps_scans[:split], "pandaset")
+        _cache_val(ps_scans[split:])
+        del ps_scans; gc.collect()
 
     if "3dref" in ds_cfg:
         root = ds_cfg["3dref"]["root"]
         ref_stride = ds_cfg["3dref"].get("stride", 1)
         ref_scans = load_3dref(root, stride=ref_stride)
         split = int(len(ref_scans) * 0.8)
-        _add_train(ref_scans[:split], "3dref")
-        if split < len(ref_scans):
-            all_val_scans.extend(ref_scans[split:])
+        _cache_train(ref_scans[:split], "3dref")
+        _cache_val(ref_scans[split:])
+        del ref_scans; gc.collect()
 
     # ---- NEW DATASETS (residential/European) ----
 
     if "hessigheim" in ds_cfg:
         root = ds_cfg["hessigheim"]["root"]
         h3d_train = load_hessigheim(root, split="train")
+        _cache_train(h3d_train, "hessigheim")
+        del h3d_train; gc.collect()
         h3d_val = load_hessigheim(root, split="val")
-        _add_train(h3d_train, "hessigheim")
-        all_val_scans.extend(h3d_val)
+        _cache_val(h3d_val)
+        del h3d_val; gc.collect()
 
     if "semantic3d" in ds_cfg:
         root = ds_cfg["semantic3d"]["root"]
         s3d_stride = ds_cfg["semantic3d"].get("stride", 1)
         s3d_scans = load_semantic3d(root, stride=s3d_stride)
         split = int(len(s3d_scans) * 0.8)
-        _add_train(s3d_scans[:split], "semantic3d")
-        if split < len(s3d_scans):
-            all_val_scans.extend(s3d_scans[split:])
+        _cache_train(s3d_scans[:split], "semantic3d")
+        _cache_val(s3d_scans[split:])
+        del s3d_scans; gc.collect()
 
     if "dales" in ds_cfg:
         root = ds_cfg["dales"]["root"]
         dales_stride = ds_cfg["dales"].get("stride", 1)
         dales_scans = load_dales(root, stride=dales_stride)
         split = int(len(dales_scans) * 0.8)
-        _add_train(dales_scans[:split], "dales")
-        if split < len(dales_scans):
-            all_val_scans.extend(dales_scans[split:])
+        _cache_train(dales_scans[:split], "dales")
+        _cache_val(dales_scans[split:])
+        del dales_scans; gc.collect()
 
     if "vaihingen" in ds_cfg:
         root = ds_cfg["vaihingen"]["root"]
         vai_stride = ds_cfg["vaihingen"].get("stride", 1)
         vai_scans = load_vaihingen(root, stride=vai_stride)
         split = int(len(vai_scans) * 0.8)
-        _add_train(vai_scans[:split], "vaihingen")
-        if split < len(vai_scans):
-            all_val_scans.extend(vai_scans[split:])
+        _cache_train(vai_scans[:split], "vaihingen")
+        _cache_val(vai_scans[split:])
+        del vai_scans; gc.collect()
 
     if "sensaturban" in ds_cfg:
         root = ds_cfg["sensaturban"]["root"]
         su_stride = ds_cfg["sensaturban"].get("stride", 1)
         su_scans = load_sensaturban(root, stride=su_stride)
         split = int(len(su_scans) * 0.8)
-        _add_train(su_scans[:split], "sensaturban")
-        if split < len(su_scans):
-            all_val_scans.extend(su_scans[split:])
+        _cache_train(su_scans[:split], "sensaturban")
+        _cache_val(su_scans[split:])
+        del su_scans; gc.collect()
 
     if "parislille" in ds_cfg:
         root = ds_cfg["parislille"]["root"]
         pl_stride = ds_cfg["parislille"].get("stride", 1)
         pl_scans = load_parislille(root, stride=pl_stride)
         split = int(len(pl_scans) * 0.8)
-        _add_train(pl_scans[:split], "parislille")
-        if split < len(pl_scans):
-            all_val_scans.extend(pl_scans[split:])
+        _cache_train(pl_scans[:split], "parislille")
+        _cache_val(pl_scans[split:])
+        del pl_scans; gc.collect()
 
-    if not all_train_scans:
+    if not train_npz_paths:
         raise RuntimeError("No training data! Check dataset paths in config.yaml")
 
     # Print per-dataset summary
@@ -1304,34 +1404,35 @@ def train(cfg):
     print(f"{'-'*50}")
     for di, dname in enumerate(ds_names):
         count = train_ds_ids.count(di)
-        pct = 100 * count / len(all_train_scans)
+        pct = 100 * count / len(train_npz_paths)
         print(f"  {dname:<13} {count:>10,}  {pct:>5.1f}%")
     print(f"{'-'*50}")
-    print(f"  {'TOTAL':<13} {len(all_train_scans):>10,}  100.0%")
-    print(f"  Val scans: {len(all_val_scans):,}")
+    print(f"  {'TOTAL':<13} {len(train_npz_paths):>10,}  100.0%")
+    print(f"  Val scans: {len(val_npz_paths):,}")
+    print(f"  Cache dir: {cache_dir}")
     print(f"{'='*50}\n")
 
-    # ---- Datasets (precompute features, then free raw scans) ----
+    # ---- Datasets (lazy loading from disk cache) ----
     train_ds = PointCloudTileDataset(
-        all_train_scans, crop_points=crop, voxel=voxel,
+        train_npz_paths, crop_points=crop, voxel=voxel,
         augment=True, do_mod_drop=True, steps_per_epoch=steps,
-        scan_datasets=train_ds_ids)
+        scan_datasets=train_ds_ids, cache_size=50)
     val_ds = PointCloudTileDataset(
-        all_val_scans if all_val_scans else all_train_scans[:1],
+        val_npz_paths if val_npz_paths else train_npz_paths[:1],
         crop_points=crop, voxel=voxel,
-        augment=False, do_mod_drop=False, steps_per_epoch=min(100, steps))
+        augment=False, do_mod_drop=False, steps_per_epoch=min(100, steps),
+        cache_size=20)
 
+    # IMPORTANT: num_workers=0 for lazy loading (LRU cache is not fork-safe)
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, collate_fn=collate_fn,
+        num_workers=0, collate_fn=collate_fn,
         pin_memory=True, drop_last=True)
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, collate_fn=collate_fn, pin_memory=True)
+        num_workers=0, collate_fn=collate_fn, pin_memory=True)
 
-    # Free original scan data (already copied into Dataset.prepared)
-    del all_train_scans, all_val_scans
-    import gc; gc.collect()
+    gc.collect()
 
     # ---- Model (Point Transformer V3) ----
     ptv3_cfg = cfg.get("ptv3", {})
