@@ -56,14 +56,14 @@ crop_points: 32768       # 64K — veći crop za bolje lokalne kontekste
 voxel: 0.02
 augment: true
 modality_dropout: true
-steps_per_epoch: 1500    # 1500 — više koraka jer 7 dataseta (bilo 1000 za 3)
+steps_per_epoch: 500     # smanjeno s 1500 — weighted sampling pokriva sve datasete
+                         # i s 500 koraka po epohi
 
-batch_size: 4            # 4 × 64K pts = ~40GB VRAM (sigurno za A6000)
+batch_size: 4            # 4 × 32K pts — A6000 48GB
 num_classes: 8
 in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
-lr: 0.0004               # malo niži LR — 7 dataseta = šumovitiji gradijenti
-                         # cosine decay do 1e-6
-epochs: 150              # manje epoha jer je steps_per_epoch veći
-                         # ukupno koraka: 150×1500 = 225K (prije 200×1000 = 200K)
+lr: 0.0004               # cosine decay do 1e-6
+epochs: 80               # 80 × 500 = 40K koraka (125 iteracija/epoha)
+                         # epoha ~27 min → ukupno ~36 sati
 out_dir: /workspace/runs/ptv3_7ds
 num_workers: 8
