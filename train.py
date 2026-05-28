@@ -740,12 +740,16 @@ def load_hessigheim(root, split="all"):
     return scans
 
 
-def load_semantic3d(root, stride=1):
+def load_semantic3d(root, stride=1, max_points=20_000_000):
     """Load Semantic3D (terrestrial scanner, European villages).
 
     Semantic3D format:
         root/station1.txt          — space-separated: x y z intensity r g b
         root/station1.labels       — one label per line (integer)
+
+    max_points: subsample scans larger than this (default 20M).
+        Semantic3D scans can be 500M+ points which kills RAM.
+        20M points per scan is plenty for training crops.
     """
     base = Path(root)
     scans = []
@@ -763,8 +767,37 @@ def load_semantic3d(root, stride=1):
     for txt_path, lbl_path in pairs:
         try:
             print(f"    {txt_path.name}: ", end="", flush=True)
-            # Semantic3D files can be very large — use numpy for speed
-            data = np.loadtxt(str(txt_path), dtype=np.float32)
+
+            # Count lines first (cheap) to decide subsampling
+            n_lines = sum(1 for _ in open(txt_path, 'r'))
+            print(f"{n_lines:,} pts", end="", flush=True)
+
+            # If scan is larger than max_points, read only a random subset
+            if n_lines > max_points:
+                # Pick which lines to keep
+                keep = set(np.random.choice(n_lines, max_points, replace=False))
+                rows_data = []
+                rows_label = []
+                with open(txt_path, 'r') as f_txt, open(lbl_path, 'r') as f_lbl:
+                    for li in range(n_lines):
+                        line_d = f_txt.readline()
+                        line_l = f_lbl.readline()
+                        if li in keep:
+                            vals = line_d.strip().split()
+                            rows_data.append([float(v) for v in vals])
+                            rows_label.append(int(line_l.strip()))
+                data = np.array(rows_data, dtype=np.float32)
+                label_raw = np.array(rows_label, dtype=np.int64)
+                del rows_data, rows_label, keep
+                print(f" → subsampled to {max_points:,}", end="", flush=True)
+            else:
+                data = np.loadtxt(str(txt_path), dtype=np.float32)
+                label_raw = np.loadtxt(str(lbl_path), dtype=np.int64)
+                if len(label_raw) != len(data):
+                    print(f" [SKIP: label mismatch]")
+                    del data, label_raw
+                    continue
+
             # columns: x, y, z, intensity, r, g, b
             xyz = data[:, :3].astype(np.float32)
 
@@ -780,18 +813,13 @@ def load_semantic3d(root, stride=1):
                 if rgb.max() > 1.0:
                     rgb /= 255.0
 
-            label_raw = np.loadtxt(str(lbl_path), dtype=np.int64)
-            if len(label_raw) != len(xyz):
-                print(f"[SKIP: label count mismatch {len(label_raw)} vs {len(xyz)}]")
-                continue
-
             labels = apply_map(label_raw, SEMANTIC3D_MAP)
             scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=intensity,
                                     labels=labels))
-            print(f"{len(xyz):,} points → mapped")
-            del data
+            print(f" → mapped")
+            del data, label_raw
         except Exception as e:
-            print(f"[WARN: {e}]")
+            print(f" [WARN: {e}]")
             continue
 
     total_pts = sum(s.xyz.shape[0] for s in scans) if scans else 0
@@ -1000,12 +1028,13 @@ def load_parislille(root, stride=1):
 # Scan Cache — preprocess to disk, load lazily
 # ============================================================================
 
-def preprocess_to_cache(scans, cache_dir, start_idx=0):
+def preprocess_to_cache(scans, cache_dir, start_idx=0, max_points=20_000_000):
     """Precompute HAG+features for each scan, save as .npz, return count.
 
     Each scan is saved as cache_dir/scan_{idx:06d}.npz with keys:
       xyz (N,3), feats (N,5), labels (N,)
     After saving, the scan data is freed from memory.
+    max_points: subsample scans larger than this to fit in RAM.
     Returns the number of scans saved.
     """
     cache_dir = Path(cache_dir)
@@ -1018,12 +1047,30 @@ def preprocess_to_cache(scans, cache_dir, start_idx=0):
             saved += 1
             continue
         try:
-            hag = height_above_ground_from_labels(scan.xyz, scan.labels)
-            feats = pack_features(scan.rgb, scan.intensity, hag)
+            xyz = scan.xyz
+            rgb = scan.rgb
+            intensity = scan.intensity
+            labels = scan.labels
+
+            # Subsample if too large
+            n = len(xyz)
+            if n > max_points:
+                pick = np.random.choice(n, max_points, replace=False)
+                pick.sort()
+                xyz = xyz[pick]
+                labels = labels[pick]
+                if rgb is not None:
+                    rgb = rgb[pick]
+                if intensity is not None:
+                    intensity = intensity[pick]
+                print(f"      scan {idx}: {n:,} → {max_points:,} (subsampled)")
+
+            hag = height_above_ground_from_labels(xyz, labels)
+            feats = pack_features(rgb, intensity, hag)
             np.savez_compressed(out_path,
-                                xyz=scan.xyz.astype(np.float32),
+                                xyz=xyz.astype(np.float32),
                                 feats=feats.astype(np.float32),
-                                labels=scan.labels.astype(np.int64))
+                                labels=labels.astype(np.int64))
             saved += 1
         except Exception as e:
             print(f"    [WARN] cache scan {idx}: {e}")
