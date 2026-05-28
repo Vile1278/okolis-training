@@ -51,7 +51,7 @@ ptv3:
 # Prošli trening (3 dataseta): peak mIoU=0.5648 @ epoch 55, stagnacija do 200.
 # Sad imamo 7 dataseta — više raznolikosti, treba više koraka ali manje epoha.
 
-crop_points: 65536       # 64K — veći crop za bolje lokalne kontekste
+crop_points: 32768       # 64K — veći crop za bolje lokalne kontekste
                          # A6000 48GB drži batch=4 × 64K
 voxel: 0.02
 augment: true
