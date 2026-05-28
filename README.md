@@ -38,7 +38,6 @@ Koristi Toronto3D + SemanticKITTI + Pandaset + Hessigheim3D + Semantic3D + Sensa
 
 ```bash
 pip install plyfile pyyaml scipy
-apt-get install -y unzip
 ```
 
 ### 4. Klonirati repo
@@ -110,10 +109,10 @@ du -sh .
 
 **Paris-Lille-3D**
 ```bash
+apt-get install -y unzip
 mkdir -p /workspace/data/ParisLille3D && cd /workspace/data/ParisLille3D
 gdown "TVOJ_GOOGLE_DRIVE_LINK" -O ParisLille3D.zip
 unzip ParisLille3D.zip && rm ParisLille3D.zip
-rm *.zip
 ```
 
 **Hessigheim 3D**
