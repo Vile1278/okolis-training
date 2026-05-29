@@ -51,19 +51,19 @@ ptv3:
 # Prošli trening (3 dataseta): peak mIoU=0.5648 @ epoch 55, stagnacija do 200.
 # Sad imamo 7 dataseta — više raznolikosti, treba više koraka ali manje epoha.
 
-crop_points: 32768       # 64K — veći crop za bolje lokalne kontekste
-                         # A6000 48GB drži batch=4 × 64K
+crop_points: 65536       # 65K — duplo veći kontekst za bolje razumijevanje scene
+                         # A6000 48GB drži batch=2 × 65K (~isti VRAM kao 4×32K)
 voxel: 0.02
 augment: true
 modality_dropout: true
-steps_per_epoch: 500     # smanjeno s 1500 — weighted sampling pokriva sve datasete
-                         # i s 500 koraka po epohi
+steps_per_epoch: 800     # više koraka jer je batch manji (batch=2)
+                         # 800 steps / batch 2 = 400 iteracija po epohi
 
-batch_size: 4            # 4 × 32K pts — A6000 48GB
+batch_size: 2            # 2 × 65K pts ≈ 130K pts — slično kao 4×32K=128K
 num_classes: 8
 in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
-lr: 0.0004               # cosine decay do 1e-6
-epochs: 80               # 80 × 500 = 40K koraka (125 iteracija/epoha)
-                         # epoha ~27 min → ukupno ~36 sati
+lr: 0.0006               # malo viši LR za brži start, cosine decay do 1e-6
+epochs: 100              # 100 × 800 = 80K koraka
+                         # epoha ~27 min → ukupno ~45 sati
 out_dir: /workspace/runs/ptv3_7ds
 num_workers: 8
