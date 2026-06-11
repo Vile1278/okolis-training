@@ -6,33 +6,23 @@
 
 # ── Datasets ─────────────────────────────────────────────────────────────
 datasets:
-  # ── Postojeći (urbani) ──
-  toronto3d:
-    root: /workspace/data/Toronto_3D
-    weight: 1.0
-  semantickitti:
-    root: /workspace/data/SemanticKITTI
-    weight: 0.7
-  pandaset:
-    root: /workspace/data/Pandaset
-    weight: 0.8
-    stride: 5
-
-  # ── NOVI (rezidencijalni/europski) ──
   hessigheim:                              # German village, UAV LiDAR — BEST match!
     root: /workspace/data/Hessigheim3D
-    weight: 1.5                            # highest weight — closest to our use case
+    weight: 2.0                            # rezidencijalno selo, kuće, ograde, vrtovi
   semantic3d:                              # European villages, terrestrial scanner
     root: /workspace/data/Semantic3D
-    weight: 1.2                            # high weight — street-level perspective
-  # dales i vaihingen — izostavljeni (nedostupni za download)
-  sensaturban:                             # UK cities, UAV — 3B points, residential
-    root: /workspace/data/SensatUrban
-    weight: 0.8
-    stride: 1
+    weight: 1.5                            # s tla, europski kontekst — slično iPhoneu
   parislille:                              # French cities, mobile LiDAR — street level!
     root: /workspace/data/ParisLille3D
-    weight: 1.0
+    weight: 1.2                            # ulični LiDAR, ceste, zgrade, pločnici
+  toronto3d:
+    root: /workspace/data/Toronto_3D
+    weight: 1.0                            # urbani, ima vehicle/road/building
+
+  # ── ISKLJUČENI ──
+  # semantickitti — autoceste, dominirao trening
+  # pandaset — autonomna vožnja, premalo rezidencijalno
+  # sensaturban — UAV perspektiva, previše drugačije od iPhonea
 
 # SemanticKITTI: load every Nth scan (saves RAM)
 kitti_scan_stride: 5
@@ -65,5 +55,5 @@ in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
 lr: 0.0006               # malo viši LR za brži start, cosine decay do 1e-6
 epochs: 100              # 100 × 800 = 80K koraka
                          # epoha ~27 min → ukupno ~45 sati
-out_dir: /workspace/runs/ptv3_7ds
+out_dir: /workspace/runs/ptv3_4ds
 num_workers: 8
