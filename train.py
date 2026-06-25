@@ -1580,11 +1580,15 @@ def train(cfg):
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 
             loss_val = loss.item()
+            # Skip NaN batches — don't let them corrupt running stats
+            if math.isnan(loss_val):
+                print(f"  [WARN] NaN loss at epoch {epoch} step {step+1}, skipping")
+                continue
             total_loss += loss_val
 
             # Track per-dataset loss (each batch sample may be from different dataset)
@@ -1626,7 +1630,7 @@ def train(cfg):
             # Sort by loss descending (hardest first)
             ds_losses.sort(key=lambda x: -x[1])
             for dname, dloss, dcnt in ds_losses:
-                bar = "█" * min(30, int(dloss * 15))
+                bar = "█" * min(30, int(dloss * 15)) if not math.isnan(dloss) else "?"
                 status = "◀ hardest" if dloss == ds_losses[0][1] and dloss > 0 else ""
                 print(f"    {dname:<14} loss={dloss:.4f}  samples={dcnt:>5}  "
                       f"{bar} {status}")
