@@ -1585,9 +1585,9 @@ def train(cfg):
             scaler.update()
 
             loss_val = loss.item()
-            # Skip NaN batches — don't let them corrupt running stats
-            if math.isnan(loss_val):
-                print(f"  [WARN] NaN loss at epoch {epoch} step {step+1}, skipping")
+            # Skip NaN/Inf batches — don't let them corrupt running stats
+            if not math.isfinite(loss_val):
+                print(f"  [WARN] non-finite loss at epoch {epoch} step {step+1}, skipping")
                 continue
             total_loss += loss_val
 
