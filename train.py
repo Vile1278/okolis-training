@@ -1548,11 +1548,17 @@ def train(cfg):
     # ---- Optimizer ----
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
-    scaler = GradScaler()
+    # bfloat16 umjesto fp16: isti dinamički raspon kao fp32 — nema overflow → nema NaN.
+    # GradScaler nije potreban za bf16 (disabled = passthrough).
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    scaler = GradScaler(enabled=not use_bf16)
+    print(f"  AMP dtype: {'bfloat16' if use_bf16 else 'float16 (+GradScaler)'}")
     lovasz = LovaszSoftmax(ignore_index=0)
 
     # ---- Train ----
     best_miou = 0.0
+    nan_streak = 0
     n_datasets = len(ds_names)
     print(f"\n=== Training: {epochs} epochs, {steps} steps/epoch, batch={batch_size} ===")
     print(f"    Tracking loss for {n_datasets} datasets: {', '.join(ds_names)}\n")
@@ -1572,23 +1578,36 @@ def train(cfg):
 
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast(device_type="cuda", enabled=torch.cuda.is_available()):
+            with autocast(device_type="cuda", dtype=amp_dtype,
+                          enabled=torch.cuda.is_available()):
                 logits = model(xyz, feats)
                 ce = class_weighted_ce(logits, labels)
                 lv = lovasz(logits, labels)
                 loss = ce + 0.5 * lv
+
+            loss_val = loss.item()
+            # Skip non-finite batches BEFORE backward — no chance to corrupt weights
+            if not math.isfinite(loss_val):
+                nan_streak += 1
+                print(f"  [WARN] non-finite loss at epoch {epoch} step {step+1}, skipping")
+                if nan_streak >= 30:
+                    # Weights likely corrupted — restore last good checkpoint
+                    restore = out_dir / "last.pt"
+                    if restore.exists():
+                        print(f"  [RECOVERY] {nan_streak} non-finite steps in a row — "
+                              f"restoring {restore}")
+                        ck = torch.load(restore, map_location=device, weights_only=False)
+                        model.load_state_dict(ck["model"])
+                        optimizer.load_state_dict(ck["optimizer"])
+                        nan_streak = 0
+                continue
+            nan_streak = 0
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
-
-            loss_val = loss.item()
-            # Skip NaN/Inf batches — don't let them corrupt running stats
-            if not math.isfinite(loss_val):
-                print(f"  [WARN] non-finite loss at epoch {epoch} step {step+1}, skipping")
-                continue
             total_loss += loss_val
 
             # Track per-dataset loss (each batch sample may be from different dataset)
@@ -1635,26 +1654,31 @@ def train(cfg):
                 print(f"    {dname:<14} loss={dloss:.4f}  samples={dcnt:>5}  "
                       f"{bar} {status}")
 
-        # Save
-        ckpt = {
-            "epoch": epoch,
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "miou": miou,
-            "loss": avg_loss,
-            "cfg": {
-                "num_classes": num_classes,
-                "in_feat_dim": cfg.get("in_feat_dim", 5),
-                "model": "ptv3",
-                "ptv3": ptv3_cfg,
-            },
-        }
-        torch.save(ckpt, out_dir / "last.pt")
+        # Save — only if weights are healthy (never overwrite last.pt with NaN weights)
+        weights_ok = all(torch.isfinite(p).all() for p in model.parameters())
+        if not weights_ok:
+            print(f"  [WARN] non-finite weights at end of epoch {epoch} — "
+                  f"NOT saving last.pt")
+        else:
+            ckpt = {
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "miou": miou,
+                "loss": avg_loss,
+                "cfg": {
+                    "num_classes": num_classes,
+                    "in_feat_dim": cfg.get("in_feat_dim", 5),
+                    "model": "ptv3",
+                    "ptv3": ptv3_cfg,
+                },
+            }
+            torch.save(ckpt, out_dir / "last.pt")
 
-        if miou > best_miou:
-            best_miou = miou
-            torch.save(ckpt, out_dir / "best.pt")
-            print(f"  >> New best mIoU: {best_miou:.4f}")
+            if miou > best_miou:
+                best_miou = miou
+                torch.save(ckpt, out_dir / "best.pt")
+                print(f"  >> New best mIoU: {best_miou:.4f}")
 
     print(f"\n=== Done. Best mIoU: {best_miou:.4f} ===")
     print(f"Model saved: {out_dir / 'best.pt'}")
