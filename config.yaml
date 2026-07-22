@@ -18,14 +18,17 @@ datasets:
   toronto3d:
     root: /workspace/data/Toronto_3D
     weight: 1.0                            # urbani, ima vehicle/road/building
+  semantickitti:                           # vraćen s velikim stride-om — jedini
+    root: /workspace/data/SemanticKITTI    # pravi izvor sidewalk primjera
+    weight: 0.4                            # nizak weight — ne smije dominirati
 
   # ── ISKLJUČENI ──
-  # semantickitti — autoceste, dominirao trening
   # pandaset — autonomna vožnja, premalo rezidencijalno
   # sensaturban — UAV perspektiva, previše drugačije od iPhonea
 
-# SemanticKITTI: load every Nth scan (saves RAM)
-kitti_scan_stride: 5
+# SemanticKITTI: load every Nth scan (saves RAM + disk)
+kitti_scan_stride: 20   # 20 → ~192 scanova (bilo 5 → 3834) — dovoljno za
+                        # sidewalk/fence primjere bez dominacije
 
 # ── Point Transformer V3 architecture ────────────────────────────────────
 ptv3:
@@ -55,5 +58,6 @@ in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
 lr: 0.0003               # konzervativniji LR — 0.0006 uzrokovao NaN na epohi 7
 epochs: 100              # 100 × 800 = 80K koraka
                          # epoha ~27 min → ukupno ~45 sati
-out_dir: /workspace/runs/ptv3_4ds
+out_dir: /workspace/runs/ptv3_5ds_v2   # v2: fence mapping fix + SemanticKITTI
+                                       # stride 20 — novi cache
 num_workers: 8

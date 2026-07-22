@@ -131,7 +131,8 @@ HESSIGHEIM_MAP = {
     6: 6,    # Shrub → vegetation
     7: 6,    # Tree → vegetation
     8: 1,    # Soil/Gravel → ground
-    9: 4,    # Vertical Surface → building (walls etc.)
+    9: 5,    # Vertical Surface → fence (garden walls, retaining walls, fences —
+             #   NOT façades; those are class 5)
     10: 4,   # Chimney → building
 }
 
@@ -145,7 +146,8 @@ SEMANTIC3D_MAP = {
     3: 6,    # high vegetation → vegetation
     4: 6,    # low vegetation → vegetation
     5: 4,    # buildings → building
-    6: 3,    # hard scape (sidewalks, curbs) → sidewalk
+    6: 5,    # hard scape (garden walls, banks, fountains) → fence
+             #   (za Okoliš AI: zidovi/ograde oko dvorišta — ne pločnici!)
     7: 0,    # scanning artefacts → unlabeled
     8: 7,    # cars → vehicle
 }
