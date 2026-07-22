@@ -1408,7 +1408,9 @@ def train(cfg):
         del train_scans; gc.collect()
         val_scans = load_semantickitti(root, train_sequences=["08"],
             stride=stride)
-        _cache_val(val_scans)
+        # Cap KITTI val: cijela seq 08 (~200 scanova) bi preplavila val set
+        # (ostali dataseti imaju ~6 val scanova ukupno) i iskrivila mIoU
+        _cache_val(val_scans[:10])
         del val_scans; gc.collect()
 
     if "pandaset" in ds_cfg:
