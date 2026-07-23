@@ -1229,6 +1229,10 @@ class PointCloudTileDataset(Dataset):
         _, pick = np.unique(k, return_index=True)
         return xyz[pick], feats[pick], labels[pick]
 
+    # Rijetke klase za ciljano sidro cropa: sidewalk(3), fence(5), vehicle(7)
+    RARE_CLASSES = (3, 5, 7)
+    RARE_ANCHOR_P = 0.35  # 35% cropova centrirano na rijetku klasu (ako postoji)
+
     def _anchor_crop(self, xyz, feats, labels):
         N = len(xyz)
         if N == 0:
@@ -1241,7 +1245,17 @@ class PointCloudTileDataset(Dataset):
             pad = np.random.randint(0, N, size=self.crop - N)
             idx = np.concatenate([np.arange(N), pad])
         else:
-            anchor = xyz[np.random.randint(N)]
+            anchor_idx = None
+            # Rare-class anchoring: s vjerojatnošću p centriraj crop na točku
+            # rijetke klase, da model češće vidi cijele aute/ograde/pločnike
+            if self.augment and np.random.rand() < self.RARE_ANCHOR_P:
+                rare_cls = np.random.choice(self.RARE_CLASSES)
+                rare_pts = np.flatnonzero(labels == rare_cls)
+                if len(rare_pts) > 0:
+                    anchor_idx = np.random.choice(rare_pts)
+            if anchor_idx is None:
+                anchor_idx = np.random.randint(N)
+            anchor = xyz[anchor_idx]
             d2 = ((xyz - anchor) ** 2).sum(axis=1)
             idx = np.argpartition(d2, self.crop)[:self.crop]
         return xyz[idx], feats[idx], labels[idx]
