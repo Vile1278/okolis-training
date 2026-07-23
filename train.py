@@ -33,6 +33,12 @@ CLASS_NAMES = [
     "building", "fence", "vegetation", "vehicle",
 ]
 
+# CE class weights ~ 1/sqrt(udio klase u train podacima), normalizirano.
+# Rijetke klase (sidewalk 1.5%, fence 2.5%, vehicle 2%) dobivaju jači gradijent
+# da ih česte klase (road 30%, building 15%) ne preglasaju.
+# unlabeled=0.0 jer je ignore_index.
+CLASS_WEIGHTS = [0.0, 0.7, 0.4, 1.8, 0.6, 1.5, 0.7, 1.5]
+
 # Toronto3D: 0=unclass, 1=ground, 2=road_marking, 3=natural(veg),
 #             4=building, 5=utility_line, 6=pole, 7=car, 8=fence
 TORONTO3D_MAP = {
@@ -1614,7 +1620,7 @@ def train(cfg):
             with autocast(device_type="cuda", dtype=amp_dtype,
                           enabled=torch.cuda.is_available()):
                 logits = model(xyz, feats)
-                ce = class_weighted_ce(logits, labels)
+                ce = class_weighted_ce(logits, labels, weights=CLASS_WEIGHTS)
                 lv = lovasz(logits, labels)
                 loss = ce + 0.5 * lv
 
