@@ -1408,9 +1408,10 @@ def train(cfg):
         del train_scans; gc.collect()
         val_scans = load_semantickitti(root, train_sequences=["08"],
             stride=stride)
-        # Cap KITTI val: cijela seq 08 (~200 scanova) bi preplavila val set
-        # (ostali dataseti imaju ~6 val scanova ukupno) i iskrivila mIoU
-        _cache_val(val_scans[:10])
+        # Cap KITTI val: cijela seq 08 (~200 scanova) bi preplavila val set.
+        # Cap=2 jer ostali dataseti imaju ~6 val scanova — KITTI udio u valu
+        # (~25%) tada približno odgovara njegovoj ulozi u treningu.
+        _cache_val(val_scans[:2])
         del val_scans; gc.collect()
 
     if "pandaset" in ds_cfg:
@@ -1559,6 +1560,20 @@ def train(cfg):
     scaler = GradScaler(enabled=not use_bf16)
     print(f"  AMP dtype: {'bfloat16' if use_bf16 else 'float16 (+GradScaler)'}")
     lovasz = LovaszSoftmax(ignore_index=0)
+
+    # ---- Resume from checkpoint (weights only, fresh schedule) ----
+    resume_path = cfg.get("resume_from")
+    if resume_path and Path(resume_path).exists():
+        ck = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ck["model"])
+        try:
+            optimizer.load_state_dict(ck["optimizer"])
+        except Exception:
+            print("  [resume] optimizer state mismatch — fresh optimizer")
+        print(f"  [resume] loaded weights from {resume_path} "
+              f"(epoch {ck.get('epoch', '?')}, mIoU {ck.get('miou', 0):.4f})")
+    elif resume_path:
+        print(f"  [resume] {resume_path} ne postoji — trening od nule")
 
     # ---- Train ----
     best_miou = 0.0

@@ -60,4 +60,6 @@ epochs: 100              # 100 × 800 = 80K koraka
                          # epoha ~27 min → ukupno ~45 sati
 out_dir: /workspace/runs/ptv3_5ds_v2   # v2: fence mapping fix + SemanticKITTI
                                        # stride 20 — novi cache
+resume_from: /workspace/runs/ptv3_5ds_v2/last.pt   # nastavi od epohe 22
+                                       # (makni ovu liniju za trening od nule)
 num_workers: 8
