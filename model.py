@@ -127,7 +127,20 @@ class WindowedAttention(nn.Module):
 
         # Attention
         attn = (q @ k.transpose(-2, -1)) * self.scale
+
+        # Maskiraj padding tokene (samo zadnji prozor ih ima) — inače nulti
+        # tokeni sudjeluju u softmaxu i razvodnjavaju attention.
+        if pad > 0:
+            key_valid = torch.ones(B * nW, Np // nW, dtype=torch.bool,
+                                   device=x.device)
+            # zadnji prozor svakog batcha ima 'pad' nevažećih tokena na kraju
+            key_valid = key_valid.reshape(B, nW, W)
+            key_valid[:, -1, W - pad:] = False
+            key_valid = key_valid.reshape(B * nW, 1, 1, W)
+            attn = attn.masked_fill(~key_valid, float("-inf"))
+
         attn = attn.softmax(dim=-1)
+        attn = torch.nan_to_num(attn, nan=0.0)  # red od svih -inf → 0
         attn = self.attn_drop(attn)
 
         out = (attn @ v).transpose(1, 2).reshape(B * nW, W, C)
@@ -404,12 +417,23 @@ class PointTransformerV3(nn.Module):
 
             if i < self.n_stages - 1:
                 cur_xyz, cur_feat, cluster, _ = self.pools[i](cur_xyz, cur_feat)
-                enc_clusters.append(cluster)
 
                 # Re-serialize at new scale
                 new_order = serialize_points(cur_xyz, grid_size=self.serialize_grid)
                 cur_xyz = reorder(cur_xyz, new_order)
                 cur_feat = reorder(cur_feat, new_order)
+
+                # KRITIČNO: cluster indeksi pokazuju na voxele u STAROM
+                # (pre-serijalizacijskom) poretku. Nakon permutacije coarse
+                # točaka, indekse treba provući kroz inverznu permutaciju —
+                # inače decoder unpoola KRIVE feature na svaku točku!
+                B_, M_ = new_order.shape
+                inv = torch.empty_like(new_order)
+                inv.scatter_(1, new_order,
+                             torch.arange(M_, device=new_order.device)
+                             .unsqueeze(0).expand(B_, -1))
+                cluster = torch.gather(inv, 1, cluster)
+                enc_clusters.append(cluster)
 
         # ── Decoder ──────────────────────────────────────────────────
         dec_feat = cur_feat

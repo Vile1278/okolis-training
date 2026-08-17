@@ -58,8 +58,9 @@ in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
 lr: 0.0003               # konzervativniji LR — 0.0006 uzrokovao NaN na epohi 7
 epochs: 100              # 100 × 800 = 80K koraka
                          # epoha ~27 min → ukupno ~45 sati
-out_dir: /workspace/runs/ptv3_5ds_v2   # v2: fence mapping fix + SemanticKITTI
-                                       # stride 20 — novi cache
-resume_from: /workspace/runs/ptv3_5ds_v2/last.pt   # nastavi od epohe 22
-                                       # (makni ovu liniju za trening od nule)
+out_dir: /workspace/runs/ptv3_v2_fixed   # NOVI RUN: popravljeni decoder (cluster
+                                         # remap), attention maska, warmup —
+                                         # trening OD NULE (stari checkpointi
+                                         # trenirani s bugom, nisu upotrebljivi)
+# resume_from: (isključeno — decoder fix zahtijeva svjež start)
 num_workers: 8

@@ -1183,6 +1183,11 @@ class PointCloudTileDataset(Dataset):
         return self.steps
 
     def __getitem__(self, idx):
+        # Val (augment=False): deterministički odabir — ista evaluacija svaku
+        # epohu, bez šuma slučajnih cropova koji maskira stvarni trend mIoU
+        if not self.augment:
+            rng_state = np.random.get_state()
+            np.random.seed(1000 + idx)
         # Random scan
         if self._scan_probs is not None:
             si = np.random.choice(len(self.scan_paths), p=self._scan_probs)
@@ -1211,6 +1216,10 @@ class PointCloudTileDataset(Dataset):
         ds_id = 0
         if self.scan_datasets is not None:
             ds_id = self.scan_datasets[si]
+
+        # Vrati globalni RNG state (val determinizam ne smije utjecati na trening)
+        if not self.augment:
+            np.random.set_state(rng_state)
 
         return (torch.from_numpy(xyz).float(),
                 torch.from_numpy(feats).float(),
@@ -1320,7 +1329,10 @@ def evaluate(model, loader, num_classes, device):
 
     iou = inter[1:] / union[1:].clamp(min=1)
     per_class = {CLASS_NAMES[i+1]: float(iou[i]) for i in range(len(iou))}
-    miou = float(iou[iou > 0].mean()) if (iou > 0).any() else 0.0
+    # mIoU preko klasa PRISUTNIH u val podacima (union>0) — klasa koju model
+    # promaši (IoU=0) mora vući prosjek dolje, inače je metrika napuhana
+    present = union[1:] > 0
+    miou = float(iou[present].mean()) if present.any() else 0.0
     return miou, per_class
 
 
@@ -1572,7 +1584,15 @@ def train(cfg):
 
     # ---- Optimizer ----
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    # Linear warmup (3 epohe) + cosine decay — standard za transformere;
+    # sprječava rane eksplozije gradijenata dok su težine još slučajne
+    warmup_epochs = 3
+    def _lr_lambda(ep):
+        if ep < warmup_epochs:
+            return (ep + 1) / warmup_epochs
+        t = (ep - warmup_epochs) / max(1, epochs - warmup_epochs)
+        return max(1e-6 / lr, 0.5 * (1 + math.cos(math.pi * t)))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
     # bfloat16 umjesto fp16: isti dinamički raspon kao fp32 — nema overflow → nema NaN.
     # GradScaler nije potreban za bf16 (disabled = passthrough).
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
