@@ -162,8 +162,13 @@ python -c "import zipfile; zipfile.ZipFile('labels.zip').extractall('.')"
 
 ```bash
 cd /workspace/okolis-training
-python train.py --config config.yaml
+nohup python train.py --config config.yaml > train.log 2>&1 &
+tail -f train.log
 ```
+
+Trening radi u pozadini i preživi zatvaranje browsera/terminala.
+`tail -f train.log` prati izlaz (Ctrl+C prekida samo gledanje, ne trening).
+Za ponovno spajanje: `tail -f /workspace/okolis-training/train.log`
 
 ## Konfiguracija (RTX A6000 48GB)
 
@@ -178,7 +183,7 @@ Ključni parametri u `config.yaml`:
 
 ## Izlaz
 
-Modeli se spremaju u `/workspace/runs/ptv3_a6000/`:
+Modeli se spremaju u `/workspace/runs/ptv3_v2_fixed/`:
 - `last.pt` — zadnji checkpoint
 - `best.pt` — checkpoint sa najboljim mIoU
 
