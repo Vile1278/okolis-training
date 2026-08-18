@@ -1374,6 +1374,28 @@ def train(cfg):
     ds_names = []           # ordered list of dataset names
     ds_cfg = cfg.get("datasets", {})
 
+    # ── MANIFEST: ako cache već postoji, preskoči učitavanje sirovih dataseta
+    # (učitavanje sirovih podataka traje 30-60 min i zahtijeva /workspace/data;
+    #  s manifestom trening kreće za par sekundi samo iz cachea)
+    import json
+    manifest_path = cache_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            m = json.loads(manifest_path.read_text())
+            ok = all(Path(p).exists() for p in m["train_paths"][:5])  # spot check
+            if ok and m.get("datasets") == sorted(ds_cfg.keys()):
+                train_npz_paths = [Path(p) for p in m["train_paths"]]
+                train_ds_ids = m["train_ds_ids"]
+                val_npz_paths = [Path(p) for p in m["val_paths"]]
+                ds_names = m["ds_names"]
+                ds_cfg = {}  # isprazni → svi loader blokovi se preskaču
+                print(f"  MANIFEST: cache pronađen — {len(train_npz_paths)} train "
+                      f"+ {len(val_npz_paths)} val scanova, preskačem sirove datasete")
+            else:
+                print("  MANIFEST: nevažeći (promijenjeni dataseti?) — gradim cache ispočetka")
+        except Exception as e:
+            print(f"  MANIFEST: greška čitanja ({e}) — gradim cache ispočetka")
+
     train_offset = 0  # global scan index for cache naming
     val_offset = 0
 
@@ -1522,6 +1544,17 @@ def train(cfg):
 
     if not train_npz_paths:
         raise RuntimeError("No training data! Check dataset paths in config.yaml")
+
+    # Spremi manifest — sljedeći start preskače sirove datasete (kreće iz cachea)
+    if not manifest_path.exists():
+        manifest_path.write_text(json.dumps({
+            "datasets": sorted(cfg.get("datasets", {}).keys()),
+            "ds_names": ds_names,
+            "train_paths": [str(p) for p in train_npz_paths],
+            "train_ds_ids": train_ds_ids,
+            "val_paths": [str(p) for p in val_npz_paths],
+        }))
+        print(f"  MANIFEST spremljen: {manifest_path}")
 
     # Print per-dataset summary
     print(f"\n{'='*50}")

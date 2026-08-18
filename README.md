@@ -1,7 +1,8 @@
-# Okoliš AI — PTv3
+# Okoliš AI — PTv3 trening
 
 Standalone trening za 8-klasnu semantičku segmentaciju point cloudova.
-Koristi Toronto3D + SemanticKITTI + Pandaset + Hessigheim3D + Semantic3D + SensatUrban + Paris-Lille-3D datasete.
+**Aktivnih 5 dataseta:** Hessigheim3D, Semantic3D, Paris-Lille-3D, Toronto3D, SemanticKITTI.
+(Pandaset i SensatUrban su isključeni — NE skidati, štedi ~50 GB.)
 
 ## Klase (8)
 
@@ -18,185 +19,126 @@ Koristi Toronto3D + SemanticKITTI + Pandaset + Hessigheim3D + Semantic3D + Sensa
 
 ## Datoteke
 
-- `config.yaml` — konfiguracija (batch size, learning rate, putanje dataseta)
-- `model.py` — Point Transformer V3 implementacija
+- `config.yaml` — konfiguracija (dataseti, weightovi, hiperparametri)
+- `model.py` — Point Transformer V3 (s decoder fixom, kolovoz 2026.)
 - `losses.py` — Lovász-Softmax + weighted cross-entropy
-- `train.py` — cjelokupni trening skript
-- `train.ipynb` — Jupyter notebook za RunPod
+- `train.py` — trening skript (lazy cache, weighted sampling, manifest)
+- `analyze_classes.py` — analiza distribucije klasa u cacheu
 
-## Brzi start (RunPod / JupyterLab)
+## Brzi start (RunPod)
 
-### 1. Pokrenuti RunPod pod
+### 1. Kreirati pod
 
-- Template: **RunPod Pytorch 2.x**
+- Template: **RunPod PyTorch 2.x**
 - GPU: **RTX A6000 (48 GB VRAM)**
-- Disk: **100+ GB** (za datasete)
+- **VAŽNO: dodati Network Volume (150+ GB) montiran na /workspace** —
+  bez toga terminiranje poda briše sve datasete i checkpointe!
 
-### 2. Otvoriti terminal ili train.ipynb u JupyterLabu
-
-### 3. Instalirati zavisnosti
-
-```bash
-pip install plyfile pyyaml scipy
-```
-
-### 4. Klonirati repo
+### 2. Setup
 
 ```bash
 cd /workspace
 git clone https://github.com/Vile1278/okolis-training.git
 cd okolis-training
+pip install plyfile pyyaml scipy pandas gdown "laspy[lazrs]"
+mkdir -p /workspace/data
 ```
 
-### 5. Pripremiti datasete
+### 3. Dataseti (5 potrebnih, ~120 GB, ~2-3 h)
 
-**Kaggle** 
+**SemanticKITTI (~80 GB — pokrenuti PRVI, u pozadini):**
 ```bash
-pip install kaggle gdown laspy[lazrs]
+mkdir -p /workspace/data/SemanticKITTI && cd /workspace/data/SemanticKITTI
+nohup wget -c "https://s3.eu-central-1.amazonaws.com/avg-kitti/data_odometry_velodyne.zip" -O velodyne.zip > kitti_dl.log 2>&1 &
+wget "https://www.semantic-kitti.org/assets/data_odometry_labels.zip" -O labels.zip
+# kad velodyne završi:
+python -c "import zipfile; zipfile.ZipFile('velodyne.zip').extractall('.')"
+python -c "import zipfile; zipfile.ZipFile('labels.zip').extractall('.')"
+rm velodyne.zip labels.zip
 ```
 
-**Kaggle** 
+**Semantic3D (~30 GB):**
 ```bash
-mkdir /root/.kaggle
-echo '{"username":"TVOJ_USERNAME","key":"TVOJ_KEY"}' > /root/.kaggle/kaggle.json
-chmod 600 /root/.kaggle/kaggle.json
-```
-
-**data dir** 
-```bash
-mkdir /workspace/data
-```
-
-**Semantic3D**
-```bash
-
 mkdir -p /workspace/data/Semantic3D && cd /workspace/data/Semantic3D
-
-# Training point clouds (~12 GB komprimirano)
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/bildstein_station1_xyz_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/bildstein_station3_xyz_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/bildstein_station5_xyz_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/domfountain_station1_xyz_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/domfountain_station2_xyz_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/domfountain_station3_xyz_intensity_rgb.7z &
-wait
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/neugasse_station1_xyz_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg27_station1_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg27_station2_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg27_station4_intensity_rgb.7z &
-wait
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg27_station5_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg27_station9_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/sg28_station4_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/untermaederbrunnen_station1_xyz_intensity_rgb.7z &
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/untermaederbrunnen_station3_xyz_intensity_rgb.7z &
-wait
-
-# Labeli
-wget https://share.phys.ethz.ch/~pf/semantic3d/data/sem8_labels_training.7z
-
-# Raspakiraj sve i očisti
+for f in bildstein_station1_xyz_intensity_rgb bildstein_station3_xyz_intensity_rgb \
+         bildstein_station5_xyz_intensity_rgb domfountain_station1_xyz_intensity_rgb \
+         domfountain_station2_xyz_intensity_rgb domfountain_station3_xyz_intensity_rgb \
+         neugasse_station1_xyz_intensity_rgb sg27_station1_intensity_rgb \
+         sg27_station2_intensity_rgb sg27_station4_intensity_rgb \
+         sg27_station5_intensity_rgb sg27_station9_intensity_rgb \
+         sg28_station4_intensity_rgb untermaederbrunnen_station1_xyz_intensity_rgb \
+         untermaederbrunnen_station3_xyz_intensity_rgb; do
+  wget -c "https://share.phys.ethz.ch/~pf/semantic3d/data/point-clouds/training1/$f.7z"
+done
+wget -c https://share.phys.ethz.ch/~pf/semantic3d/data/sem8_labels_training.7z
 apt-get update && apt-get install -y p7zip-full
 for f in *.7z; do 7z x "$f" && rm "$f"; done
-
-echo "DONE — $(ls *.txt | wc -l) txt files, $(du -sh . | cut -f1) total"
-
-cd /workspace/data/Semantic3D && rm -f wget-log*
-ls -la *.txt | wc -l
-ls -la *.labels | wc -l
-du -sh .
 ```
 
-**Paris-Lille-3D**
+**Toronto3D (~4 GB, Kaggle):**
+```bash
+# jednom: postaviti kaggle.json (kaggle.com → Account → Create API Token)
+mkdir -p /root/.kaggle
+echo '{"username":"TVOJ_USERNAME","key":"TVOJ_KEY"}' > /root/.kaggle/kaggle.json
+chmod 600 /root/.kaggle/kaggle.json
+pip install kaggle
+
+mkdir -p /workspace/data/Toronto_3D && cd /workspace/data/Toronto_3D
+kaggle datasets download -d priteshraj10/point-cloud-lidar-toronto-3d
+python -c "import zipfile; zipfile.ZipFile('point-cloud-lidar-toronto-3d.zip').extractall('.')"
+rm point-cloud-lidar-toronto-3d.zip
+```
+
+**Paris-Lille-3D (~2 GB):** ručno kroz browser (ownCloud Mines ParisTech,
+lozinka `Paris-Lille-3D`), pa upload ZIP-a kroz RunPod file browser:
 ```bash
 apt-get install -y unzip
 mkdir -p /workspace/data/ParisLille3D && cd /workspace/data/ParisLille3D
-gdown "TVOJ_GOOGLE_DRIVE_LINK" -O ParisLille3D.zip
 unzip ParisLille3D.zip && rm ParisLille3D.zip
+# treba završiti s: Lille1_1.ply, Lille1_2.ply, Lille2.ply, Paris.ply
 ```
 
-**Hessigheim 3D**
+**Hessigheim 3D (~2 GB):** upload s lokalnog računala
+(`dataset/Hessigheim_Benchmark/Epoch_March2019/LiDAR/` — samo .laz fajlovi):
 ```bash
 mkdir -p /workspace/data/Hessigheim3D
-cd /workspace/data/Hessigheim3D
-gdown "LINK_TRAIN" -O Mar19_train.laz
-gdown "LINK_VAL" -O Mar19_val.laz
-gdown "LINK_TEST" -O Mar19_test_GroundTruth.laz
+# uploadaj kroz RunPod file browser: Mar19_train.laz, Mar19_val.laz
+# u /workspace/data/Hessigheim3D/
 ```
 
-**SensatUrban**
-```bash
-mkdir -p /workspace/data/SensatUrban && cd /workspace/data/SensatUrban
-gdown --folder "https://drive.google.com/drive/folders/1xd6oc0yJFQ74r54zVJCTGypohvv7ajXG"
-unzip sensaturban.zip
-```
-
-
-**Pandaset**
-```bash
-cd /workspace/data
-kaggle datasets download -d usharengaraju/pandaset-dataset --unzip -p Pandaset
-```
-
-**Toronto3D** (slobodan pristup):
-```bash
-mkdir /workspace/data/Toronto_3D
-cd /workspace/data/Toronto_3D
-kaggle datasets download -d priteshraj10/point-cloud-lidar-toronto-3d
-python -c "import zipfile; zipfile.ZipFile('point-cloud-lidar-toronto-3d.zip').extractall('.')"
-ls *.ply
-```
-
-**SemanticKITTI**:
-```bash
-mkdir -p /workspace/data/SemanticKITTI
-cd /workspace/data/SemanticKITTI
-wget "https://s3.eu-central-1.amazonaws.com/avg-kitti/data_odometry_velodyne.zip" -O velodyne.zip
-wget "https://www.semantic-kitti.org/assets/data_odometry_labels.zip" -O labels.zip
-python -c "import zipfile; zipfile.ZipFile('velodyne.zip').extractall('.')"
-python -c "import zipfile; zipfile.ZipFile('labels.zip').extractall('.')"
-```
-
-
-### 6. Pokrenuti trening
+### 4. Pokrenuti trening
 
 ```bash
 cd /workspace/okolis-training
-python train.py --config config.yaml
+nohup python train.py --config config.yaml > train.log 2>&1 &
+tail -f train.log        # Ctrl+C prekida samo gledanje, ne trening
 ```
 
-## Konfiguracija (RTX A6000 48GB)
+- Prvi start: gradi disk cache (~45-60 min) i sprema `manifest.json`
+- Svaki sljedeći start: kreće iz cachea za par sekundi (sirovi podaci
+  više nisu potrebni — smiju se i obrisati nakon prvog starta)
+- Epoha traje ~50 min; evaluacija (mIoU + per-class) svaku 5. epohu
+- Stop: kad mIoU stagnira 10 epoha (`kill %1` ili Ctrl+C ako je u forgroundu)
 
-Ključni parametri u `config.yaml`:
+## Konfiguracija (config.yaml, trenutno stanje)
 
-- `batch_size: 4` — optimalno za 48 GB VRAM
-- `crop_points: 65536` — 65K točaka po uzorku
-- `voxel: 0.02` — voxel veličina za downsample
-- `kitti_scan_stride: 5` — učitava svaki 5. KITTI sken (štedi RAM)
-- `epochs: 150` — ukupno epoha
-- `lr: 0.0004` — AdamW learning rate sa cosine decay
+- `crop_points: 65536`, `batch_size: 2` — 65K točaka po cropu (A6000 48 GB)
+- `lr: 0.0003` + warmup 3 epohe + cosine decay
+- `kitti_scan_stride: 20` — svaki 20. KITTI scan
+- weightovi dataseta: hessigheim 2.0, semantic3d 1.5, parislille 1.2, toronto3d 1.0, semantickitti 0.4
+- class weights u lossu: rijetke klase (sidewalk/fence/vehicle) pojačane
+- rare-class anchoring: 35% cropova centrirano na rijetku klasu
+- `out_dir: /workspace/runs/ptv3_v2_fixed`
 
 ## Izlaz
 
-Modeli se spremaju u `/workspace/runs/ptv3_a6000/`:
-- `last.pt` — zadnji checkpoint
-- `best.pt` — checkpoint sa najboljim mIoU
-
-Checkpoint sadrži:
-```python
-{
-    "epoch": int,
-    "model": state_dict,
-    "optimizer": state_dict,
-    "miou": float,
-    "loss": float,
-    "cfg": {"num_classes": 8, "in_feat_dim": 5}
-}
-```
+- `best.pt` — najbolji mIoU (koristiti za inference/fine-tuning)
+- `last.pt` — zadnja epoha (za resume: `resume_from` u config.yaml)
+- **best.pt skinuti lokalno nakon treninga!**
 
 ## Korištenje modela
 
-Nakon treninga, preuzmi `best.pt` i koristi ga u glavnom Okoliš AI projektu s `test_scan.py`:
+U okolis-test folderu glavnog projekta:
 ```bash
-python test_scan.py best.pt tvoj_sken.ply --export
+python test_pipeline.py --weights best.pt --ply tvoj_sken.ply --out rezultat.ply
 ```
