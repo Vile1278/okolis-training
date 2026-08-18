@@ -1546,7 +1546,13 @@ def train(cfg):
         raise RuntimeError("No training data! Check dataset paths in config.yaml")
 
     # Spremi manifest — sljedeći start preskače sirove datasete (kreće iz cachea)
-    if not manifest_path.exists():
+    # ZAŠTITA: ne spremaj ako neki dataset iz configa nije dao nijedan scan
+    # (npr. prazan folder) — inače bi manifest trajno "zamrznuo" nepotpun cache
+    missing = [d for d in cfg.get("datasets", {}) if d not in ds_names]
+    if missing:
+        print(f"  [WARN] Dataseti bez scanova: {missing} — manifest NIJE spremljen "
+              f"(provjeri foldere pa ponovo pokreni)")
+    elif not manifest_path.exists():
         manifest_path.write_text(json.dumps({
             "datasets": sorted(cfg.get("datasets", {}).keys()),
             "ds_names": ds_names,
