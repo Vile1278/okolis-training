@@ -1168,6 +1168,12 @@ class PointCloudTileDataset(Dataset):
         data = np.load(self.scan_paths[si])
         entry = (data["xyz"], data["feats"], data["labels"])
 
+        # OPTIMIZACIJA: voxel downsample ODMAH, prije spremanja u cache.
+        # Downsample je deterministički po scanu — računati ga za svaki
+        # uzorak iznova (np.unique na 20M točaka, ~10s CPU) bio je glavni
+        # trošak pripreme podataka. Ovako se plati jednom po scanu.
+        entry = self._voxel_ds(*entry)
+
         # Add to cache
         self._cache[si] = entry
         self._cache_order.append(si)
@@ -1194,9 +1200,7 @@ class PointCloudTileDataset(Dataset):
         else:
             si = np.random.randint(len(self.scan_paths))
         xyz, feats, labels = self._load_scan(si)
-
-        # Voxel downsample
-        xyz, feats, labels = self._voxel_ds(xyz, feats, labels)
+        # (voxel downsample se sad radi u _load_scan, jednom po scanu)
 
         # Anchor crop
         xyz, feats, labels = self._anchor_crop(xyz, feats, labels)
@@ -1669,7 +1673,13 @@ def train(cfg):
         ds_loss_cnt = [0] * n_datasets
         t0 = time.time()
 
+        _t_fetch = time.time()
         for step, (xyz, feats, labels, ds_ids) in enumerate(train_loader):
+            _data_t = time.time() - _t_fetch  # vrijeme pripreme podataka (CPU)
+            _t_gpu = time.time()
+            if step == 0:
+                print(f"  [telemetrija] prvi batch učitan za {_data_t:.1f}s — "
+                      f"krećem s forward passom", flush=True)
             xyz = xyz.to(device, non_blocking=True)
             feats = feats.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -1714,9 +1724,14 @@ def train(cfg):
                     ds_loss_sum[did] += loss_val
                     ds_loss_cnt[did] += 1
 
-            if (step + 1) % 100 == 0:
+            # Telemetrija svakih 10 stepova — uvijek vidljivo da trening radi,
+            # s razdvojenim vremenom pripreme podataka (CPU) i GPU koraka
+            if (step + 1) % 10 == 0:
+                _gpu_t = time.time() - _t_gpu
                 print(f"  epoch {epoch} step {step+1}/{len(train_loader)} "
-                      f"loss={loss_val:.4f}")
+                      f"loss={loss_val:.4f} data={_data_t:.1f}s gpu={_gpu_t:.1f}s",
+                      flush=True)
+            _t_fetch = time.time()
 
         scheduler.step()
         avg_loss = total_loss / max(len(train_loader), 1)
