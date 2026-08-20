@@ -1027,6 +1027,32 @@ def load_sensaturban(root, stride=1):
     return scans
 
 
+def load_iphone_npz(root, stride=1):
+    """iPhone labelirane snimke (.npz iz labels_from_ply.py).
+
+    Format: xyz (N,3) float32, rgb (N,3) float32 0-1, labels (N,) int64
+    (već u našoj 8-klasnoj taksonomiji — bez mapiranja).
+    """
+    base = Path(root)
+    scans = []
+    files = sorted(base.glob("*.npz"))[::stride]
+    print(f"  iPhone: {len(files)} files")
+    for f in files:
+        try:
+            d = np.load(f)
+            xyz = d["xyz"].astype(np.float32)
+            rgb = d["rgb"].astype(np.float32)
+            labels = d["labels"].astype(np.int64)
+            scans.append(LoadedScan(xyz=xyz, rgb=rgb, intensity=None,
+                                    labels=labels))
+            print(f"    {f.name}: {len(xyz):,} points")
+        except Exception as e:
+            print(f"    [WARN] {f.name}: {e}")
+    total = sum(len(s.xyz) for s in scans) if scans else 0
+    print(f"  iPhone total: {len(scans)} scans, {total:,} points")
+    return scans
+
+
 def load_parislille(root, stride=1):
     """Load Paris-Lille-3D (mobile LiDAR, French cities).
 
@@ -1656,6 +1682,18 @@ def train(cfg):
         _cache_train(pl_scans[:split], "parislille")
         _cache_val(pl_scans[split:])
         del pl_scans; gc.collect()
+
+    if "iphone" in ds_cfg:
+        root = ds_cfg["iphone"]["root"]
+        ip_scans = load_iphone_npz(root)
+        if len(ip_scans) >= 5:
+            # dovoljno snimaka → zadnja ide u val
+            _cache_train(ip_scans[:-1], "iphone")
+            _cache_val(ip_scans[-1:])
+        else:
+            # malo snimaka → sve u train (val ostaje od javnih dataseta)
+            _cache_train(ip_scans, "iphone")
+        del ip_scans; gc.collect()
 
     if not train_npz_paths:
         raise RuntimeError("No training data! Check dataset paths in config.yaml")

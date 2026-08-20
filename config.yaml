@@ -53,16 +53,15 @@ steps_per_epoch: 800     # više koraka jer je batch manji (batch=2)
                          # 800 steps / batch 2 = 400 iteracija po epohi
 
 batch_size: 2            # 2 × 65K pts — VRAM limit A6000
-grad_accum: 4            # efektivni batch = 2×4 = 8 (bez dodatnog VRAM-a)
+grad_accum: 1            # BILO 4 — greška: 4× manje updateova po epohi usporilo
+                         # učenje više nego što je stabilnost donijela
 num_classes: 8
 in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
-lr: 0.0005               # viši LR uz efektivni batch 8 (standard skaliranje)
+lr: 0.0003               # standard za batch 2 (vraćeno s 0.0005 uz accum fix)
 weight_decay: 0.01       # AdamW standard za transformere (bilo 1e-4 — premalo)
 ema_decay: 0.999         # EMA težine za eval/inference (0 = isključeno)
-epochs: 120              # 120 × 800 = 96K koraka; ~8 min/epoha → ~16 h
-out_dir: /workspace/runs/ptv3_v3         # RUN 3: ambiguity masking, copy-paste,
-                                         # multi-curve serijalizacija, EMA,
-                                         # grad accum — trening OD NULE
+epochs: 60               # nastavak: 60 × 400 updateova = 24K dodatnih koraka
+out_dir: /workspace/runs/ptv3_v3         # RUN 3 (nastavak s accum fixom)
 cache_dir: /workspace/runs/ptv3_v2_fixed/scan_cache   # dijeli postojeći cache!
-# resume_from: (isključeno — multi-curve serijalizacija traži svjež start)
+resume_from: /workspace/runs/ptv3_v3/last.pt   # nastavi od epohe ~70 težina
 num_workers: 8
