@@ -14,6 +14,7 @@ import yaml
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.amp import GradScaler, autocast
 from pathlib import Path
@@ -38,6 +39,35 @@ CLASS_NAMES = [
 # da ih česte klase (road 30%, building 15%) ne preglasaju.
 # unlabeled=0.0 jer je ignore_index.
 CLASS_WEIGHTS = [0.0, 0.7, 0.4, 1.8, 0.6, 1.5, 0.7, 1.5]
+
+# Dataseti koji NE razlikuju road od ground (sav teren labeliraju kao "road").
+# Za njihove road točke se road↔ground zamjena ne kažnjava (superklasa u lossu)
+# — model uči razliku samo iz dataseta koji je stvarno znaju.
+AMBIGUOUS_ROAD_GROUND_DS = {"toronto3d", "parislille"}
+
+
+def ce_with_ambiguity(logits, labels, weights, ambig_mask):
+    """Cross-entropy s road/ground superklasom za ambiguozne točke.
+
+    Za točke gdje je ambig_mask=True (road label iz dataseta koji ne razlikuje
+    road/ground), loss je -log(p_ground + p_road) — model smije reći bilo koje
+    od to dvoje bez kazne. Ostale točke: standardni weighted CE (ignore 0).
+    """
+    B, N, C = logits.shape
+    logp = F.log_softmax(logits.reshape(-1, C), dim=-1)
+    lab = labels.reshape(-1)
+    amb = ambig_mask.reshape(-1)
+    valid = lab != 0
+
+    nll = -logp.gather(1, lab.clamp(min=0).unsqueeze(1)).squeeze(1)
+    # superklasa: log(p1 + p2) = logsumexp(logp1, logp2)
+    sup = -torch.logsumexp(logp[:, 1:3], dim=1)
+    nll = torch.where(amb & valid, sup, nll)
+
+    w = torch.tensor(weights, dtype=torch.float32, device=logits.device)
+    pw = w[lab.clamp(min=0)]
+    pw = torch.where(valid, pw, torch.zeros_like(pw))
+    return (nll * pw).sum() / pw.sum().clamp(min=1.0)
 
 # Toronto3D: 0=unclass, 1=ground, 2=road_marking, 3=natural(veg),
 #             4=building, 5=utility_line, 6=pole, 7=car, 8=fence
@@ -1156,6 +1186,77 @@ class PointCloudTileDataset(Dataset):
         print(f"  LazyDataset: {len(scan_paths)} scans, "
               f"cache={cache_size}, crop={crop_points}")
 
+        # Copy-paste banka: instance rijetkih klasa (fence=5, vehicle=7)
+        # ubrane iz scanova, spremne za lijepljenje u druge cropove
+        self._instance_bank = {5: [], 7: []}
+        self._bank_max = 30      # max instanci po klasi
+        self.PASTE_P = 0.25      # vjerojatnost lijepljenja po cropu
+
+    def _harvest_instances(self, xyz, feats, labels, per_class=3):
+        """Uberi do per_class instanci fence/vehicle iz scana za banku."""
+        for cls, radius in ((5, 4.0), (7, 3.0)):
+            if len(self._instance_bank[cls]) >= self._bank_max:
+                continue
+            pts = np.flatnonzero(labels == cls)
+            if len(pts) < 500:
+                continue
+            for _ in range(per_class):
+                seed = xyz[np.random.choice(pts)]
+                d2 = ((xyz[pts] - seed) ** 2).sum(axis=1)
+                near = pts[d2 < radius * radius]
+                if len(near) < 300:
+                    continue
+                if len(near) > 15000:
+                    near = np.random.choice(near, 15000, replace=False)
+                ixyz = xyz[near].copy()
+                ixyz -= ixyz.mean(axis=0, keepdims=True)
+                ixyz[:, 2] -= ixyz[:, 2].min()  # baza instance na z=0
+                self._instance_bank[cls].append(
+                    (ixyz, feats[near].copy(), cls))
+                if len(self._instance_bank[cls]) >= self._bank_max:
+                    break
+
+    def _paste_instance(self, xyz, feats, labels):
+        """Zalijepi random instancu iz banke u crop (copy-paste augmentacija).
+
+        Instanca se rotira, postavi na lokalnu visinu terena na random XY
+        poziciji u cropu, i ZAMIJENI jednak broj postojećih točaka da crop
+        ostane iste veličine.
+        """
+        avail = [c for c in self._instance_bank if self._instance_bank[c]]
+        if not avail:
+            return xyz, feats, labels
+        cls = int(np.random.choice(avail))
+        ixyz, ifeats, _ = self._instance_bank[cls][
+            np.random.randint(len(self._instance_bank[cls]))]
+        n_inst = len(ixyz)
+        if n_inst >= len(xyz) // 4:
+            return xyz, feats, labels
+
+        # Random yaw rotacija instance
+        t = np.random.uniform(0, 2 * np.pi)
+        c, s = np.cos(t), np.sin(t)
+        R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float32)
+        ixyz = (ixyz @ R.T).astype(np.float32)
+
+        # Random XY pozicija unutar cropa; z = lokalna razina terena
+        # (aproksimacija: 5. percentil z-a točaka u blizini odabrane pozicije)
+        px = np.random.uniform(xyz[:, 0].min(), xyz[:, 0].max())
+        py = np.random.uniform(xyz[:, 1].min(), xyz[:, 1].max())
+        near = ((xyz[:, 0] - px) ** 2 + (xyz[:, 1] - py) ** 2) < 4.0
+        base_z = np.percentile(xyz[near, 2], 5) if near.sum() > 50 else xyz[:, 2].min()
+        ixyz = ixyz + np.array([px, py, base_z], dtype=np.float32)
+
+        # Zamijeni n_inst nasumičnih postojećih točaka instancom
+        drop = np.random.choice(len(xyz), n_inst, replace=False)
+        xyz = xyz.copy(); feats = feats.copy(); labels = labels.copy()
+        xyz[drop] = ixyz
+        feats[drop] = ifeats
+        # HAG featuru instance postavi relativno na novu bazu
+        feats[drop, 4] = ixyz[:, 2] - base_z
+        labels[drop] = cls
+        return xyz, feats, labels
+
     def _load_scan(self, si):
         """Load scan from cache or disk."""
         if si in self._cache:
@@ -1173,6 +1274,11 @@ class PointCloudTileDataset(Dataset):
         # uzorak iznova (np.unique na 20M točaka, ~10s CPU) bio je glavni
         # trošak pripreme podataka. Ovako se plati jednom po scanu.
         entry = self._voxel_ds(*entry)
+
+        # Copy-paste banka: pri učitavanju scana uberi instance rijetkih
+        # klasa (fence/vehicle) za kasnije lijepljenje u druge cropove
+        if self.augment:
+            self._harvest_instances(*entry)
 
         # Add to cache
         self._cache[si] = entry
@@ -1204,6 +1310,10 @@ class PointCloudTileDataset(Dataset):
 
         # Anchor crop
         xyz, feats, labels = self._anchor_crop(xyz, feats, labels)
+
+        # Copy-paste augmentacija: povremeno zalijepi ogradu/auto iz banke
+        if self.augment and np.random.rand() < self.PASTE_P:
+            xyz, feats, labels = self._paste_instance(xyz, feats, labels)
 
         # Center
         xyz = xyz - xyz.mean(axis=0, keepdims=True)
@@ -1366,7 +1476,8 @@ def train(cfg):
 
     # ---- Load datasets one-by-one, cache to disk, free RAM ----
     print("\n=== Loading datasets (disk-cached, lazy) ===")
-    cache_dir = out_dir / "scan_cache"
+    # cache_dir se može dijeliti između runova (isti podaci = isti cache)
+    cache_dir = Path(cfg.get("cache_dir", out_dir / "scan_cache"))
     train_cache = cache_dir / "train"
     val_cache = cache_dir / "val"
     train_cache.mkdir(parents=True, exist_ok=True)
@@ -1626,7 +1737,8 @@ def train(cfg):
     print(f"Model parameters: {total_params:,}")
 
     # ---- Optimizer ----
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    weight_decay = cfg.get("weight_decay", 0.01)  # AdamW standard za transformere
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     # Linear warmup (3 epohe) + cosine decay — standard za transformere;
     # sprječava rane eksplozije gradijenata dok su težine još slučajne
     warmup_epochs = 3
@@ -1648,7 +1760,8 @@ def train(cfg):
     resume_path = cfg.get("resume_from")
     if resume_path and Path(resume_path).exists():
         ck = torch.load(resume_path, map_location=device, weights_only=False)
-        model.load_state_dict(ck["model"])
+        # za resume koristi sirove težine ako postoje (EMA je za inference)
+        model.load_state_dict(ck.get("model_raw", ck["model"]))
         try:
             optimizer.load_state_dict(ck["optimizer"])
         except Exception:
@@ -1661,6 +1774,20 @@ def train(cfg):
     # ---- Train ----
     best_miou = 0.0
     nan_streak = 0
+    # Gradient accumulation (efektivni batch = batch_size × grad_accum)
+    grad_accum = int(cfg.get("grad_accum", 1))
+    _accum_count = 0
+    # EMA (exponential moving average težina) — glađa, stabilnija verzija
+    # modela za evaluaciju i spremanje; standard u SOTA receptima
+    ema_decay = float(cfg.get("ema_decay", 0.999))
+    ema_state = {k: v.detach().clone().float() if v.dtype.is_floating_point
+                 else v.detach().clone()
+                 for k, v in model.state_dict().items()} if ema_decay > 0 else None
+    if grad_accum > 1:
+        print(f"  Gradient accumulation: {grad_accum} (efektivni batch "
+              f"{batch_size * grad_accum})")
+    if ema_state is not None:
+        print(f"  EMA: decay={ema_decay}")
     n_datasets = len(ds_names)
     print(f"\n=== Training: {epochs} epochs, {steps} steps/epoch, batch={batch_size} ===")
     print(f"    Tracking loss for {n_datasets} datasets: {', '.join(ds_names)}\n")
@@ -1684,13 +1811,19 @@ def train(cfg):
             feats = feats.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
-            optimizer.zero_grad(set_to_none=True)
+            # Ambiguity maska: road točke iz dataseta koji ne razlikuju
+            # road/ground → road↔ground zamjena se ne kažnjava
+            ambig = torch.zeros_like(labels, dtype=torch.bool)
+            for bi, did in enumerate(ds_ids):
+                if 0 <= did < n_datasets and ds_names[did] in AMBIGUOUS_ROAD_GROUND_DS:
+                    ambig[bi] = labels[bi] == 2  # road label
 
             with autocast(device_type="cuda", dtype=amp_dtype,
                           enabled=torch.cuda.is_available()):
                 logits = model(xyz, feats)
-                ce = class_weighted_ce(logits, labels, weights=CLASS_WEIGHTS)
-                lv = lovasz(logits, labels)
+                ce = ce_with_ambiguity(logits, labels, CLASS_WEIGHTS, ambig)
+                # Lovász: ambiguozne točke se ignoriraju (label 0)
+                lv = lovasz(logits, torch.where(ambig, torch.zeros_like(labels), labels))
                 loss = ce + 0.5 * lv
 
             loss_val = loss.item()
@@ -1708,14 +1841,30 @@ def train(cfg):
                         model.load_state_dict(ck["model"])
                         optimizer.load_state_dict(ck["optimizer"])
                         nan_streak = 0
+                optimizer.zero_grad(set_to_none=True)
+                _accum_count = 0
                 continue
             nan_streak = 0
 
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            # Gradient accumulation: efektivni batch = batch_size × grad_accum
+            # bez dodatnog VRAM-a (gradijenti se zbrajaju kroz grad_accum stepova)
+            scaler.scale(loss / grad_accum).backward()
+            _accum_count += 1
+            if _accum_count >= grad_accum:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                _accum_count = 0
+                # EMA update nakon svakog optimizer stepa
+                if ema_state is not None:
+                    with torch.no_grad():
+                        for k, v in model.state_dict().items():
+                            if v.dtype.is_floating_point:
+                                ema_state[k].mul_(ema_decay).add_(v, alpha=1 - ema_decay)
+                            else:
+                                ema_state[k].copy_(v)
             total_loss += loss_val
 
             # Track per-dataset loss (each batch sample may be from different dataset)
@@ -1737,14 +1886,22 @@ def train(cfg):
         avg_loss = total_loss / max(len(train_loader), 1)
         elapsed = time.time() - t0
 
-        # Evaluate every 5 epochs
+        # Evaluate every 5 epochs — s EMA težinama (glađe, bolje generaliziraju)
         miou = 0.0
         iou_str = ""
         if epoch % 5 == 0 or epoch == 1:
-            miou, per_class = evaluate(model, val_loader, num_classes, device)
+            if ema_state is not None:
+                _raw_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+                model.load_state_dict({k: v.to(dtype=_raw_state[k].dtype)
+                                       for k, v in ema_state.items()})
+                miou, per_class = evaluate(model, val_loader, num_classes, device)
+                model.load_state_dict(_raw_state)
+                del _raw_state
+            else:
+                miou, per_class = evaluate(model, val_loader, num_classes, device)
             iou_str = " | ".join(f"{k}={v:.3f}" for k, v in per_class.items())
 
-        print(f"epoch {epoch:3d}/{epochs}  loss={avg_loss:.4f}  mIoU={miou:.4f}  "
+        print(f"epoch {epoch:3d}/{epochs}  loss={avg_loss:.4f}  mIoU={miou:.4f}(EMA)  "
               f"lr={optimizer.param_groups[0]['lr']:.6f}  time={elapsed:.0f}s")
         if iou_str:
             print(f"  per-class: {iou_str}")
@@ -1775,7 +1932,12 @@ def train(cfg):
         else:
             ckpt = {
                 "epoch": epoch,
-                "model": model.state_dict(),
+                # "model" = EMA težine (za inference — glađe, bolje generaliziraju);
+                # "model_raw" = sirove težine (za resume treninga)
+                "model": ({k: v.to(dtype=model.state_dict()[k].dtype)
+                           for k, v in ema_state.items()}
+                          if ema_state is not None else model.state_dict()),
+                "model_raw": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "miou": miou,
                 "loss": avg_loss,

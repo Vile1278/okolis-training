@@ -52,15 +52,17 @@ modality_dropout: true
 steps_per_epoch: 800     # više koraka jer je batch manji (batch=2)
                          # 800 steps / batch 2 = 400 iteracija po epohi
 
-batch_size: 2            # 2 × 65K pts ≈ 130K pts — slično kao 4×32K=128K
+batch_size: 2            # 2 × 65K pts — VRAM limit A6000
+grad_accum: 4            # efektivni batch = 2×4 = 8 (bez dodatnog VRAM-a)
 num_classes: 8
 in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
-lr: 0.0003               # konzervativniji LR — 0.0006 uzrokovao NaN na epohi 7
-epochs: 100              # 100 × 800 = 80K koraka
-                         # epoha ~27 min → ukupno ~45 sati
-out_dir: /workspace/runs/ptv3_v2_fixed   # NOVI RUN: popravljeni decoder (cluster
-                                         # remap), attention maska, warmup —
-                                         # trening OD NULE (stari checkpointi
-                                         # trenirani s bugom, nisu upotrebljivi)
-# resume_from: (isključeno — decoder fix zahtijeva svjež start)
+lr: 0.0005               # viši LR uz efektivni batch 8 (standard skaliranje)
+weight_decay: 0.01       # AdamW standard za transformere (bilo 1e-4 — premalo)
+ema_decay: 0.999         # EMA težine za eval/inference (0 = isključeno)
+epochs: 120              # 120 × 800 = 96K koraka; ~8 min/epoha → ~16 h
+out_dir: /workspace/runs/ptv3_v3         # RUN 3: ambiguity masking, copy-paste,
+                                         # multi-curve serijalizacija, EMA,
+                                         # grad accum — trening OD NULE
+cache_dir: /workspace/runs/ptv3_v2_fixed/scan_cache   # dijeli postojeći cache!
+# resume_from: (isključeno — multi-curve serijalizacija traži svjež start)
 num_workers: 8

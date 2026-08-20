@@ -40,12 +40,17 @@ def _interlace_bits(x: torch.Tensor, y: torch.Tensor, z: torch.Tensor) -> torch.
     return spread(x) | (spread(y) << 1) | (spread(z) << 2)
 
 
-def serialize_points(xyz: torch.Tensor, grid_size: float = 0.04) -> torch.Tensor:
+def serialize_points(xyz: torch.Tensor, grid_size: float = 0.04,
+                     axis_perm: tuple = (0, 1, 2)) -> torch.Tensor:
     """Compute z-order keys for point serialization.
 
     Args:
         xyz: (B, N, 3) point coordinates
         grid_size: voxel resolution for quantization
+        axis_perm: permutacija osi prije interlacea — različite permutacije
+            daju različite prostorne krivulje (multi-curve serijalizacija iz
+            PTv3 rada), pa točke koje su u jednoj krivulji na granici prozora
+            u drugoj završe u sredini → bolje miješanje konteksta
 
     Returns:
         order: (B, N) indices that sort points along z-order curve
@@ -57,7 +62,8 @@ def serialize_points(xyz: torch.Tensor, grid_size: float = 0.04) -> torch.Tensor
     mins = coords.min(dim=1, keepdim=True).values
     coords = coords - mins
 
-    codes = _interlace_bits(coords[..., 0], coords[..., 1], coords[..., 2])
+    a, b, c = axis_perm
+    codes = _interlace_bits(coords[..., a], coords[..., b], coords[..., c])
     order = codes.argsort(dim=1)
     return order
 
@@ -394,7 +400,10 @@ class PointTransformerV3(nn.Module):
         B, N, _ = xyz.shape
 
         # ── Serialize points via z-order curve ───────────────────────
-        order = serialize_points(xyz, grid_size=self.serialize_grid)
+        # Multi-curve: svaki stage koristi drugu permutaciju osi
+        PERMS = [(0, 1, 2), (1, 2, 0), (2, 0, 1), (0, 2, 1)]
+        order = serialize_points(xyz, grid_size=self.serialize_grid,
+                                 axis_perm=PERMS[0])
         xyz_s = reorder(xyz, order)
         feat_s = reorder(features, order)
 
@@ -418,8 +427,9 @@ class PointTransformerV3(nn.Module):
             if i < self.n_stages - 1:
                 cur_xyz, cur_feat, cluster, _ = self.pools[i](cur_xyz, cur_feat)
 
-                # Re-serialize at new scale
-                new_order = serialize_points(cur_xyz, grid_size=self.serialize_grid)
+                # Re-serialize at new scale — nova krivulja za svaki stage
+                new_order = serialize_points(cur_xyz, grid_size=self.serialize_grid,
+                                             axis_perm=PERMS[(i + 1) % len(PERMS)])
                 cur_xyz = reorder(cur_xyz, new_order)
                 cur_feat = reorder(cur_feat, new_order)
 
