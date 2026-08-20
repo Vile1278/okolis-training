@@ -336,11 +336,13 @@ class PointTransformerV3(nn.Module):
                  window_size: int = 256,
                  grid_sizes: tuple = (0.08, 0.16, 0.32),
                  drop: float = 0.0,
-                 serialize_grid: float = 0.04):
+                 serialize_grid: float = 0.04,
+                 multi_curve: bool = True):
         super().__init__()
         self.num_classes = num_classes
         self.n_stages = len(dims)
         self.serialize_grid = serialize_grid
+        self.multi_curve = multi_curve
 
         assert len(dims) == len(num_heads) == len(depths)
         assert len(grid_sizes) == len(dims) - 1
@@ -401,7 +403,11 @@ class PointTransformerV3(nn.Module):
 
         # ── Serialize points via z-order curve ───────────────────────
         # Multi-curve: svaki stage koristi drugu permutaciju osi
-        PERMS = [(0, 1, 2), (1, 2, 0), (2, 0, 1), (0, 2, 1)]
+        # (multi_curve=False za checkpointe trenirane s jednom krivuljom)
+        if self.multi_curve:
+            PERMS = [(0, 1, 2), (1, 2, 0), (2, 0, 1), (0, 2, 1)]
+        else:
+            PERMS = [(0, 1, 2)] * 4
         order = serialize_points(xyz, grid_size=self.serialize_grid,
                                  axis_perm=PERMS[0])
         xyz_s = reorder(xyz, order)

@@ -1945,7 +1945,7 @@ def train(cfg):
                     "num_classes": num_classes,
                     "in_feat_dim": cfg.get("in_feat_dim", 5),
                     "model": "ptv3",
-                    "ptv3": ptv3_cfg,
+                    "ptv3": {**ptv3_cfg, "multi_curve": True},
                 },
             }
             torch.save(ckpt, out_dir / "last.pt")
