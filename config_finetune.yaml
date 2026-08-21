@@ -1,0 +1,67 @@
+# FINE-TUNING na iPhone snimkama — od v2_fixed baze (najbolji javni model)
+#
+# Priprema:
+#   1. Uploadaj labelirane .npz fajlove (iz labels_from_ply.py) u /workspace/data/iPhone/
+#   2. Provjeri da /workspace/runs/ptv3_v2_fixed/best.pt postoji
+#   3. nohup python -u train.py --config config_finetune.yaml > train_ft.log 2>&1 &
+
+datasets:
+  # iPhone snimke — ciljna domena, dominira trening
+  iphone:
+    root: /workspace/data/iPhone
+    weight: 3.0
+  # Javni dataseti ostaju s malim weightovima — sprječavaju "katastrofalno
+  # zaboravljanje" (model ne smije zaboraviti opće znanje dok uči tvoju domenu)
+  hessigheim:
+    root: /workspace/data/Hessigheim3D
+    weight: 0.8
+  semantic3d:
+    root: /workspace/data/Semantic3D
+    weight: 0.6
+  parislille:
+    root: /workspace/data/ParisLille3D
+    weight: 0.5
+  toronto3d:
+    root: /workspace/data/Toronto_3D
+    weight: 0.4
+  semantickitti:
+    root: /workspace/data/SemanticKITTI
+    weight: 0.2
+
+kitti_scan_stride: 20
+
+# Arhitektura — IDENTIČNA v2_fixed (multi_curve isključen jer je baza
+# trenirana s jednom krivuljom!)
+ptv3:
+  dims: [48, 96, 192, 384]
+  num_heads: [3, 6, 12, 24]
+  depths: [2, 2, 6, 2]
+  window_size: 256
+  grid_sizes: [0.08, 0.16, 0.32]
+  serialize_grid: 0.04
+  drop: 0.1
+  multi_curve: false
+
+crop_points: 65536
+voxel: 0.02
+augment: true
+modality_dropout: true
+steps_per_epoch: 800
+
+batch_size: 2
+grad_accum: 1
+num_classes: 8
+in_feat_dim: 5
+lr: 0.0001               # nizak LR — fino podešavanje, ne rušenje naučenog
+weight_decay: 0.01
+ema_decay: 0.999
+epochs: 25               # kratko: 25 × 400 updateova; stani ako mIoU stagnira
+
+out_dir: /workspace/runs/ptv3_finetune
+# NOVI cache (uključuje iPhone scanove) — gradi se iz sirovih podataka!
+# iPhone scanovi su mali pa je build brz; javni se preskaču ako kopiraš:
+#   mkdir -p /workspace/runs/ptv3_finetune/scan_cache
+#   cp -r /workspace/runs/ptv3_v2_fixed/scan_cache/train /workspace/runs/ptv3_finetune/scan_cache/
+#   cp -r /workspace/runs/ptv3_v2_fixed/scan_cache/val /workspace/runs/ptv3_finetune/scan_cache/
+#   (manifest NE kopirati — mora se regenerirati s iPhone scanovima!)
+resume_from: /workspace/runs/ptv3_v2_fixed/best.pt

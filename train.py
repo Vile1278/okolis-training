@@ -1770,6 +1770,7 @@ def train(cfg):
         grid_sizes=tuple(ptv3_cfg.get("grid_sizes", [0.08, 0.16, 0.32])),
         drop=ptv3_cfg.get("drop", 0.0),
         serialize_grid=ptv3_cfg.get("serialize_grid", 0.04),
+        multi_curve=ptv3_cfg.get("multi_curve", True),
     ).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
@@ -1983,7 +1984,8 @@ def train(cfg):
                     "num_classes": num_classes,
                     "in_feat_dim": cfg.get("in_feat_dim", 5),
                     "model": "ptv3",
-                    "ptv3": {**ptv3_cfg, "multi_curve": True},
+                    "ptv3": {**ptv3_cfg,
+                             "multi_curve": ptv3_cfg.get("multi_curve", True)},
                 },
             }
             torch.save(ckpt, out_dir / "last.pt")
