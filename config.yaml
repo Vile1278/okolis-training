@@ -5,36 +5,33 @@
 # Ukupno ~5 milijardi točaka (s stride-om ~500M efektivno)
 
 # ── Datasets ─────────────────────────────────────────────────────────────
+# SAMO 3 EUROPSKA DATASETA najbliža iPhone snimci dvorišta.
+# Svi imaju boju (osim ParisLille) i snimljeni su s tla ili niskog UAV-a —
+# nema više auto-LiDAR autocesta koje su unosile šum.
 datasets:
-  hessigheim:                              # German village, UAV LiDAR — BEST match!
-    root: /workspace/data/Hessigheim3D
-    weight: 2.0                            # rezidencijalno selo, kuće, ograde, vrtovi
-  semantic3d:                              # European villages, terrestrial scanner
-    root: /workspace/data/Semantic3D
-    weight: 1.5                            # s tla, europski kontekst — slično iPhoneu
-  parislille:                              # French cities, mobile LiDAR — street level!
-    root: /workspace/data/ParisLille3D
-    weight: 1.2                            # ulični LiDAR, ceste, zgrade, pločnici
-  toronto3d:
-    root: /workspace/data/Toronto_3D
-    weight: 1.0                            # urbani, ima vehicle/road/building
-  semantickitti:                           # vraćen s velikim stride-om — jedini
-    root: /workspace/data/SemanticKITTI    # pravi izvor sidewalk primjera
-    weight: 0.4                            # nizak weight — ne smije dominirati
+  hessigheim:                              # njemačko selo, UAV, s bojom
+    root: /workspace/data/Hessigheim3D     # zidići, vrtovi, kuće — najbliže
+    weight: 2.0
+  semantic3d:                              # europska sela, terestrijalni skener
+    root: /workspace/data/Semantic3D       # perspektiva s tla kao iPhone, s bojom
+    weight: 1.6
+  parislille:                              # francuske ulice, mobilni LiDAR
+    root: /workspace/data/ParisLille3D     # zidovi/parapeti, teren, zgrade
+    weight: 1.0
 
   # ── ISKLJUČENI ──
-  # pandaset — autonomna vožnja, premalo rezidencijalno
-  # sensaturban — UAV perspektiva, previše drugačije od iPhonea
-
-# SemanticKITTI: load every Nth scan (saves RAM + disk)
-kitti_scan_stride: 20   # 20 → ~192 scanova (bilo 5 → 3834) — dovoljno za
-                        # sidewalk/fence primjere bez dominacije
+  # semantickitti — auto-LiDAR autoceste, bez boje, rijedak; 965 scanova šuma
+  # toronto3d — urbani auto-LiDAR, služio je samo za vehicle klasu (izbačena)
+  # pandaset, sensaturban — vožnja / pogled iz zraka
 
 # ── Point Transformer V3 architecture ────────────────────────────────────
+# VEĆI MODEL (~28M parametara umjesto 7.3M). Referentni PTv3 iz literature
+# (Salvatierra et al. 2026, aerial LiDAR benchmark) ima 46M — naš je dosad
+# bio 6× manji od standarda, što je vjerojatno bila prava kočnica, a ne podaci.
 ptv3:
-  dims: [48, 96, 192, 384]
-  num_heads: [3, 6, 12, 24]
-  depths: [2, 2, 6, 2]
+  dims: [64, 128, 256, 512]          # bilo [48, 96, 192, 384]
+  num_heads: [4, 8, 16, 32]          # bilo [3, 6, 12, 24] (dims/16)
+  depths: [2, 2, 8, 2]               # bilo [2, 2, 6, 2] — dublja 3. razina
   window_size: 256
   grid_sizes: [0.08, 0.16, 0.32]    # voxel sizes for GridPool between stages
   serialize_grid: 0.04               # z-order quantization grid
@@ -44,8 +41,10 @@ ptv3:
 # Prošli trening (3 dataseta): peak mIoU=0.5648 @ epoch 55, stagnacija do 200.
 # Sad imamo 7 dataseta — više raznolikosti, treba više koraka ali manje epoha.
 
-crop_points: 65536       # 65K — duplo veći kontekst za bolje razumijevanje scene
-                         # A6000 48GB drži batch=2 × 65K (~isti VRAM kao 4×32K)
+crop_points: 49152       # 48K — smanjeno s 65K jer je model 3.5× veći
+                         # (48K × veći model ≈ isti VRAM kao 65K × mali model).
+                         # AKO PUKNE CUDA OOM: smanji na 32768.
+                         # AKO OSTANE <35 GB VRAM-a: vrati na 65536.
 voxel: 0.02
 augment: true
 modality_dropout: true
@@ -60,8 +59,10 @@ in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
 lr: 0.0003               # standard za batch 2 (vraćeno s 0.0005 uz accum fix)
 weight_decay: 0.01       # AdamW standard za transformere (bilo 1e-4 — premalo)
 ema_decay: 0.999         # EMA težine za eval/inference (0 = isključeno)
-epochs: 60               # nastavak: 60 × 400 updateova = 24K dodatnih koraka
-out_dir: /workspace/runs/ptv3_v3         # RUN 3 (nastavak s accum fixom)
-cache_dir: /workspace/runs/ptv3_v2_fixed/scan_cache   # dijeli postojeći cache!
-resume_from: /workspace/runs/ptv3_v3/last.pt   # nastavi od epohe ~70 težina
+epochs: 70               # veći model → epoha ~15 min → ~17 h ukupno
+out_dir: /workspace/runs/ptv3_big         # RUN 4: veći model (28M) + 7 klasa
+                                          # (ground+road spojeni, fence→wall)
+cache_dir: /workspace/runs/ptv3_big/scan_cache   # NOVI cache — labele su se
+                                          # promijenile (spajanje + wall fix)!
+# resume_from: (isključeno — druga arhitektura i druge labele = svjež start)
 num_workers: 8

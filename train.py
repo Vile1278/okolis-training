@@ -28,22 +28,33 @@ from losses import LovaszSoftmax, class_weighted_ce
 # ============================================================================
 # Label Maps (8 classes)
 # ============================================================================
+# 7 klasa: ground i road SPOJENI u "ground" (teren) — razlika je bila glavni
+# izvor konflikta među datasetima (Toronto/ParisLille sav teren zovu road,
+# Semantic3D/Hessigheim razlikuju) i model je zbog toga gubio obje klase.
+# Indeks 2 ostaje prazan radi kompatibilnosti postojećih mapa labela —
+# remap_labels() ga pretvara u 1.
 NUM_CLASSES = 8
 CLASS_NAMES = [
-    "unlabeled", "ground", "road", "sidewalk",
-    "building", "fence", "vegetation", "vehicle",
+    "unlabeled", "ground", "(spojeno u ground)", "sidewalk",
+    "building", "wall", "vegetation", "(vehicle izbačen)",
 ]
+# Vehicle (7) IZBAČEN: auti se u aplikaciji rješavaju geometrijskim
+# klasteriranjem kao "nepoznati objekt" — ne treba im vlastita klasa.
+MERGE_VEHICLE_INTO_UNLABELED = True
+# Klasa 5 = WALL: niski zidovi oko kuće/vrta (suhozidi, potporni i ogradni
+# zidovi, zidane ograde). Razlika od building: manja visina (<2.5 m) i
+# izduženost — building je velika ploha velike visine (fasada, krov).
+MERGE_ROAD_INTO_GROUND = True
 
 # CE class weights ~ 1/sqrt(udio klase u train podacima), normalizirano.
 # Rijetke klase (sidewalk 1.5%, fence 2.5%, vehicle 2%) dobivaju jači gradijent
 # da ih česte klase (road 30%, building 15%) ne preglasaju.
 # unlabeled=0.0 jer je ignore_index.
-CLASS_WEIGHTS = [0.0, 0.7, 0.4, 1.8, 0.6, 1.5, 0.7, 1.5]
+CLASS_WEIGHTS = [0.0, 0.4, 0.0, 1.8, 0.6, 1.5, 0.7, 0.0]
 
-# Dataseti koji NE razlikuju road od ground (sav teren labeliraju kao "road").
-# Za njihove road točke se road↔ground zamjena ne kažnjava (superklasa u lossu)
-# — model uči razliku samo iz dataseta koji je stvarno znaju.
-AMBIGUOUS_ROAD_GROUND_DS = {"toronto3d", "parislille"}
+# Spajanjem road→ground konflikt taksonomija je RIJEŠEN u korijenu, pa
+# ambiguity masking više nije potreban (prazan skup = isključen).
+AMBIGUOUS_ROAD_GROUND_DS = set()
 
 
 def ce_with_ambiguity(logits, labels, weights, ambig_mask):
@@ -72,7 +83,9 @@ def ce_with_ambiguity(logits, labels, weights, ambig_mask):
 # Toronto3D: 0=unclass, 1=ground, 2=road_marking, 3=natural(veg),
 #             4=building, 5=utility_line, 6=pole, 7=car, 8=fence
 TORONTO3D_MAP = {
-    0: 0, 1: 2, 2: 2, 3: 6, 4: 4, 5: 0, 6: 0, 7: 7, 8: 5,
+    # Toronto klasa 8 = žičane/metalne cestovne ograde — NIJE zid oko kuće,
+    # drugačiji oblik i materijal → unlabeled (ne zagađuje wall klasu)
+    0: 0, 1: 2, 2: 2, 3: 6, 4: 4, 5: 0, 6: 0, 7: 7, 8: 0,
     #                                 ^pole→unlabeled  ^car→vehicle
 }
 
@@ -82,7 +95,9 @@ SEMKITTI_RAW_MAP = {
     10: 7, 11: 7, 13: 7, 15: 7, 16: 7, 18: 7, 20: 7,  # car/truck/motorcycle/etc → vehicle
     30: 0, 31: 0, 32: 0,                                  # persons → unlabeled
     40: 2, 44: 3, 48: 3, 49: 1,                            # road/parking/sidewalk/other-ground
-    50: 4, 51: 5, 52: 0,                                   # building/fence/other-struct
+    # KITTI 51 = "fence" uz ceste (žičane, zaštitne) — ne odgovara zidićima
+    # oko kuće → unlabeled umjesto wall
+    50: 4, 51: 0, 52: 0,                                   # building/fence→unlabeled/other
     60: 2,                                                  # lane-marking → road
     70: 6, 71: 6, 72: 1,                                   # vegetation/trunk/terrain
     80: 0, 81: 0,                                           # pole/traffic-sign → unlabeled
@@ -167,7 +182,7 @@ HESSIGHEIM_MAP = {
     6: 6,    # Shrub → vegetation
     7: 6,    # Tree → vegetation
     8: 1,    # Soil/Gravel → ground
-    9: 5,    # Vertical Surface → fence (garden walls, retaining walls, fences —
+    9: 5,    # Vertical Surface → WALL (vrtni i potporni zidovi — točno naša klasa;
              #   NOT façades; those are class 5)
     10: 4,   # Chimney → building
 }
@@ -182,7 +197,7 @@ SEMANTIC3D_MAP = {
     3: 6,    # high vegetation → vegetation
     4: 6,    # low vegetation → vegetation
     5: 4,    # buildings → building
-    6: 5,    # hard scape (garden walls, banks, fountains) → fence
+    6: 5,    # hard scape (vrtni zidovi, nasipi, fontane) → WALL
              #   (za Okoliš AI: zidovi/ograde oko dvorišta — ne pločnici!)
     7: 0,    # scanning artefacts → unlabeled
     8: 7,    # cars → vehicle
@@ -250,7 +265,8 @@ PARISLILLE_MAP = {
     3: 0,    # pole → unlabeled
     4: 0,    # bollard → unlabeled
     5: 0,    # trash can → unlabeled
-    6: 5,    # barrier → fence
+    6: 5,    # barrier → WALL (uključuje ulične zidiće i parapete — najbliže
+             #   našoj klasi; ParisLille je uličan pa ima i ogradnih zidova)
     7: 0,    # pedestrian → unlabeled
     8: 7,    # car → vehicle
     9: 6,    # natural → vegetation
@@ -258,10 +274,18 @@ PARISLILLE_MAP = {
 
 
 def apply_map(labels, mapping):
-    """Remap integer labels via a dict."""
+    """Remap integer labels via a dict.
+
+    Ako je MERGE_ROAD_INTO_GROUND, road(2) se spaja u ground(1) — jedinstveno
+    mjesto kroz koje prolaze SVI dataseti, pa je spajanje globalno i sigurno.
+    """
     out = np.zeros_like(labels, dtype=np.int64)
     for src, dst in mapping.items():
         out[labels == src] = dst
+    if MERGE_ROAD_INTO_GROUND:
+        out[out == 2] = 1
+    if MERGE_VEHICLE_INTO_UNLABELED:
+        out[out == 7] = 0
     return out
 
 
