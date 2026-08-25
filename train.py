@@ -50,7 +50,9 @@ MERGE_ROAD_INTO_GROUND = True
 # Rijetke klase (sidewalk 1.5%, fence 2.5%, vehicle 2%) dobivaju jači gradijent
 # da ih česte klase (road 30%, building 15%) ne preglasaju.
 # unlabeled=0.0 jer je ignore_index.
-CLASS_WEIGHTS = [0.0, 0.4, 0.0, 1.8, 0.6, 1.5, 0.7, 0.0]
+# Pojačano za wall(5) i sidewalk(3) — mrtve su na 0.07 kroz 35 epoha jer
+# imaju premalo primjera (samo Hessigheim). Jači gradijent + više podataka.
+CLASS_WEIGHTS = [0.0, 0.3, 0.0, 3.5, 0.5, 3.5, 0.6, 0.0]
 
 # Spajanjem road→ground konflikt taksonomija je RIJEŠEN u korijenu, pa
 # ambiguity masking više nije potreban (prazan skup = isključen).
@@ -1409,8 +1411,8 @@ class PointCloudTileDataset(Dataset):
         return xyz[pick], feats[pick], labels[pick]
 
     # Rijetke klase za ciljano sidro cropa: sidewalk(3), fence(5), vehicle(7)
-    RARE_CLASSES = (3, 5, 7)
-    RARE_ANCHOR_P = 0.35  # 35% cropova centrirano na rijetku klasu (ako postoji)
+    RARE_CLASSES = (3, 5)   # sidewalk, wall (vehicle izbačen iz taksonomije)
+    RARE_ANCHOR_P = 0.50    # 50% cropova centrirano na rijetku klasu (bilo 35%)
 
     def _anchor_crop(self, xyz, feats, labels):
         N = len(xyz)
@@ -1655,9 +1657,16 @@ def train(cfg):
 
     if "hessigheim" in ds_cfg:
         root = ds_cfg["hessigheim"]["root"]
+        # TRAIN + TEST_GroundTruth: Hessigheim je JEDINI izvor wall i sidewalk
+        # klasa, pa koristimo sve labelirane scanove koje imamo. Test split ne
+        # trebamo čuvati (ne šaljemo rezultate na službeni benchmark), a nosi
+        # ~50% više primjera upravo onih klasa koje model ne uspijeva naučiti.
         h3d_train = load_hessigheim(root, split="train")
-        _cache_train(h3d_train, "hessigheim")
-        del h3d_train; gc.collect()
+        h3d_test = load_hessigheim(root, split="test")
+        _cache_train(h3d_train + h3d_test, "hessigheim")
+        print(f"    Hessigheim trening: {len(h3d_train)} train + "
+              f"{len(h3d_test)} test_GT scanova")
+        del h3d_train, h3d_test; gc.collect()
         h3d_val = load_hessigheim(root, split="val")
         _cache_val(h3d_val)
         del h3d_val; gc.collect()

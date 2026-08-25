@@ -10,14 +10,14 @@
 # nema više auto-LiDAR autocesta koje su unosile šum.
 datasets:
   hessigheim:                              # njemačko selo, UAV, s bojom
-    root: /workspace/data/Hessigheim3D     # zidići, vrtovi, kuće — najbliže
-    weight: 2.0
+    root: /workspace/data/Hessigheim3D     # JEDINI izvor wall i sidewalk klasa
+    weight: 3.0                            # bilo 2.0 — pojačano (train+test_GT)
   semantic3d:                              # europska sela, terestrijalni skener
     root: /workspace/data/Semantic3D       # perspektiva s tla kao iPhone, s bojom
-    weight: 1.6
+    weight: 1.4
   parislille:                              # francuske ulice, mobilni LiDAR
     root: /workspace/data/ParisLille3D     # zidovi/parapeti, teren, zgrade
-    weight: 1.0
+    weight: 0.8
 
   # ── ISKLJUČENI ──
   # semantickitti — auto-LiDAR autoceste, bez boje, rijedak; 965 scanova šuma
@@ -59,10 +59,9 @@ in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
 lr: 0.0003               # standard za batch 2 (vraćeno s 0.0005 uz accum fix)
 weight_decay: 0.01       # AdamW standard za transformere (bilo 1e-4 — premalo)
 ema_decay: 0.999         # EMA težine za eval/inference (0 = isključeno)
-epochs: 70               # veći model → epoha ~15 min → ~17 h ukupno
-out_dir: /workspace/runs/ptv3_big         # RUN 4: veći model (28M) + 7 klasa
-                                          # (ground+road spojeni, fence→wall)
-cache_dir: /workspace/runs/ptv3_big/scan_cache   # NOVI cache — labele su se
-                                          # promijenile (spajanje + wall fix)!
-# resume_from: (isključeno — druga arhitektura i druge labele = svjež start)
+epochs: 25               # nastavak: ground/building naučeni, ciljamo wall
+out_dir: /workspace/runs/ptv3_big2        # RUN 5: + Hessigheim test_GT,
+                                          # jači wall/sidewalk weightovi
+cache_dir: /workspace/runs/ptv3_big2/scan_cache  # novi cache (dodan test_GT)
+resume_from: /workspace/runs/ptv3_big/best.pt   # nastavi od naučenog
 num_workers: 8
