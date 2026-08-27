@@ -50,9 +50,11 @@ MERGE_ROAD_INTO_GROUND = True
 # Rijetke klase (sidewalk 1.5%, fence 2.5%, vehicle 2%) dobivaju jači gradijent
 # da ih česte klase (road 30%, building 15%) ne preglasaju.
 # unlabeled=0.0 jer je ignore_index.
-# Pojačano za wall(5) i sidewalk(3) — mrtve su na 0.07 kroz 35 epoha jer
-# imaju premalo primjera (samo Hessigheim). Jači gradijent + više podataka.
-CLASS_WEIGHTS = [0.0, 0.3, 0.0, 3.5, 0.5, 3.5, 0.6, 0.0]
+# RUN 6 (fino podešavanje): 3.5 za wall/sidewalk bilo prejako — probudilo je
+# wall (0.075→0.191) ali do kraja runa ugušilo vegetation na 0.000 i izazvalo
+# wall over-prediction na iPhone snimci. Sredina: 2.2. Vegetation vraćena na
+# 0.8, ground spušten (već na IoU 0.96, ne treba gradijent).
+CLASS_WEIGHTS = [0.0, 0.25, 0.0, 2.2, 0.5, 2.2, 0.8, 0.0]
 
 # Spajanjem road→ground konflikt taksonomija je RIJEŠEN u korijenu, pa
 # ambiguity masking više nije potreban (prazan skup = isključen).

@@ -56,12 +56,11 @@ grad_accum: 1            # BILO 4 — greška: 4× manje updateova po epohi uspo
                          # učenje više nego što je stabilnost donijela
 num_classes: 8
 in_feat_dim: 5           # [R, G, B, intensity, height_above_ground]
-lr: 0.0003               # standard za batch 2 (vraćeno s 0.0005 uz accum fix)
+lr: 0.0001               # fino podešavanje — nastavak od big2 rekorda
 weight_decay: 0.01       # AdamW standard za transformere (bilo 1e-4 — premalo)
 ema_decay: 0.999         # EMA težine za eval/inference (0 = isključeno)
-epochs: 25               # nastavak: ground/building naučeni, ciljamo wall
-out_dir: /workspace/runs/ptv3_big2        # RUN 5: + Hessigheim test_GT,
-                                          # jači wall/sidewalk weightovi
-cache_dir: /workspace/runs/ptv3_big2/scan_cache  # novi cache (dodan test_GT)
-resume_from: /workspace/runs/ptv3_big/best.pt   # nastavi od naučenog
+epochs: 10               # kratki run: balansiranje weightova (~1.5h)
+out_dir: /workspace/runs/ptv3_big3        # RUN 6: ublaženi weightovi
+cache_dir: /workspace/runs/ptv3_big2/scan_cache  # dijeli big2 cache — isti podaci
+resume_from: /workspace/runs/ptv3_big2/best.pt  # kreni od rekorda 0.4163
 num_workers: 8
