@@ -25,7 +25,7 @@ datasets:
   # pandaset, sensaturban — vožnja / pogled iz zraka
 
 # ── Point Transformer V3 architecture ────────────────────────────────────
-# VEĆI MODEL (~28M parametara umjesto 7.3M). Referentni PTv3 iz literature
+# VEĆI MODEL (14,6M parametara umjesto 7.3M). Referentni PTv3 iz literature
 # (Salvatierra et al. 2026, aerial LiDAR benchmark) ima 46M — naš je dosad
 # bio 6× manji od standarda, što je vjerojatno bila prava kočnica, a ne podaci.
 ptv3:

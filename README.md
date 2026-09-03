@@ -1,6 +1,6 @@
 # Okoliš AI — PTv3 trening
 
-Trening semantičke segmentacije point cloudova (Point Transformer V3, ~28M parametara).
+Trening semantičke segmentacije point cloudova (Point Transformer V3, 14,6M parametara).
 **Aktualni setup (Run 6):** 3 europska dataseta, nastavak od checkpointa `best_final.pt`.
 
 ## Klase (aktualna taksonomija)
@@ -114,6 +114,6 @@ python test_pipeline.py --weights best_big3.pt --out kod_Tina_big3.ply
 ## Povijest checkpointa
 | Fajl | Model | mIoU | |
 |---|---|---|---|
-| best_final.pt (= ptv3_big2/best.pt) | 28M | **0.4163** | trenutni najbolji |
+| best_final.pt (= ptv3_big2/best.pt) | 14,6M | **0.4163** | trenutni najbolji |
 | best_v2fixed.pt | 7.3M | 0.33 | stara arhitektura |
 | best_5ds / best_4ds / best_ptv3 | 7.3M | — | povijest |
