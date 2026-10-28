@@ -105,7 +105,25 @@ i testiraj u okolis-test:
 python test_pipeline.py --weights best_big3.pt --out kod_Tina_big3.ply
 ```
 
-## Aktualni parametri (Run 6 — fino podešavanje weightova)
+## FAZA A (AKTUALNO): Sonata + tensor značajke — config_sonata.yaml
+
+```bash
+# dodatni paketi (povrh koraka 1):
+pip install spconv-cu121 huggingface_hub timm      # cuXYZ po `nvcc --version`
+pip install torch-scatter -f https://data.pyg.org/whl/torch-2.4.0+cu121.html
+pip install git+https://github.com/facebookresearch/sonata.git
+
+nohup python -u train.py --config config_sonata.yaml > train_sonata.log 2>&1 &
+```
+- Novi cache (/workspace/runs/cache_feats11): voxelizirano + 11 značajki
+  (normale + tensor značajke) — gradi se automatski, stari cache ne vrijedi.
+- Sonata težine se same skinu s HuggingFacea pri prvom startu (~400 MB).
+- Encoder zamrznut prvih 5 epoha (uči se glava), pa fino sve (lr 0.0002).
+- iPhone snimke: ingest_iphone.py → make_pseudolabels.py (u okolis-test),
+  pa odkomentirati 'iphone' blok u config_sonata.yaml.
+- LICENCA: Sonata težine CC-BY-NC — samo za istraživanje/rad.
+
+## Stari parametri (Run 6 — fino podešavanje weightova)
 - CLASS_WEIGHTS: wall/sidewalk 2.2 (bilo 3.5 — prejako), vegetation 0.8, ground 0.25
 - lr 0.0001 (nježno), 10 epoha, resume od rekorda mIoU 0.4163
 - Hessigheim w=3.0 (train + test_GT), Semantic3D 1.4, ParisLille 0.8

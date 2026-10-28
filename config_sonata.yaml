@@ -1,0 +1,54 @@
+# FAZA A — Sonata pretrenirani encoder + tensor značajke + (kasnije) iPhone CoSMix
+# Pokretanje: nohup python -u train.py --config config_sonata.yaml > train_sonata.log 2>&1 &
+#
+# PREDUVJETI NA PODU (povrh standardnih iz README-a):
+#   pip install spconv-cu121 huggingface_hub timm        # cuXYZ prema `nvcc --version`
+#   pip install torch-scatter -f https://data.pyg.org/whl/torch-2.4.0+cu121.html
+#   pip install git+https://github.com/facebookresearch/sonata.git
+# Prvi start skida facebook/sonata težine s HuggingFacea (~400 MB) u ~/.cache.
+#
+# LICENCA: Sonata težine su CC-BY-NC (nekomercijalno) — OK za rad/projekt.
+
+model: sonata
+sonata:
+  ckpt: null                  # null = HuggingFace facebook/sonata; ili lokalni .pth
+  enable_flash: false         # bez flash-attentiona (nije ga potrebno instalirati)
+  freeze_encoder_epochs: 5    # prvih 5 epoha uči se samo glava
+  head_hidden: 256
+
+# ── Datasets (isti kao ptv3_big2 rekord) ────────────────────────────────
+datasets:
+  hessigheim:
+    root: /workspace/data/Hessigheim3D     # JEDINI izvor wall i sidewalk
+    weight: 3.0                            # train + test_GT
+  semantic3d:
+    root: /workspace/data/Semantic3D
+    weight: 1.4
+  parislille:
+    root: /workspace/data/ParisLille3D
+    weight: 0.8
+  # iphone blok se dodaje kad stignu snimke (vidi ingest_iphone.py):
+  # iphone:
+  #   root: /workspace/data/iphone_npz     # pseudo-labelirani npz
+  #   weight: 2.0
+
+# ── Training ────────────────────────────────────────────────────────────
+crop_points: 32768       # Sonata encoder je velik (~100M param) — manji crop.
+                         # AKO OSTANE >12 GB slobodno: probaj 49152.
+voxel: 0.02              # = Sonata grid_size; NE MIJENJATI
+augment: true
+modality_dropout: true   # gasi boju/intensity povremeno (stupci 0-3)
+steps_per_epoch: 800
+
+batch_size: 2
+grad_accum: 1
+num_classes: 8
+in_feat_dim: 11          # informativno; sonata11 feat_mode uzima sve stupce
+lr: 0.0002               # nježno — fino treniranje pretreniranog encodera
+weight_decay: 0.01
+ema_decay: 0.999
+epochs: 40
+out_dir: /workspace/runs/sonata_a
+cache_dir: /workspace/runs/cache_feats11   # NOVI cache: voxelizirano + 11 značajki
+                                           # (stari 5-feat cache NIJE kompatibilan)
+num_workers: 8

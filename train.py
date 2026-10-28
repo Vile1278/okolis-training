@@ -296,11 +296,56 @@ def apply_map(labels, mapping):
 # ============================================================================
 # Feature Utilities
 # ============================================================================
-FEAT_DIM = 5
+# FAZA A: prošireno s 5 na 11 značajki po točki.
+#   0-2  R, G, B
+#   3    intensity
+#   4    height above ground (HAG)
+#   5-7  normala (nx, ny, nz) — za Sonata encoder i orijentacijske značajke
+#   8-10 tensor značajke (Wang et al. 2022): linearity, planarity, sphericity
+# Koji stupci idu u model bira feat_mode (vidi PointCloudTileDataset).
+FEAT_DIM = 11
+FEAT_SLICES = {
+    "classic5": list(range(5)),                  # stari model (kompatibilnost)
+    "classic8": [0, 1, 2, 3, 4, 8, 9, 10],       # PTv3 + tensor značajke
+    "sonata11": list(range(11)),                 # Sonata wrapper uzima sve
+}
 
 
-def pack_features(rgb, intensity, hag):
-    """Pack into (N, 5): [R, G, B, intensity, height_above_ground]."""
+def compute_geometry(xyz, k=16, chunk=500_000):
+    """Normale + tensor značajke iz lokalne kovarijance (kNN).
+
+    Vraća (N, 6): [nx, ny, nz, linearity, planarity, sphericity].
+    Wang et al., Applied Sciences 2022 — tenzorske značajke za iPhone LiDAR.
+    Računa se JEDNOM po scanu pri izgradnji cachea (na voxeliziranim točkama).
+    """
+    from scipy.spatial import cKDTree
+    N = len(xyz)
+    out = np.zeros((N, 6), dtype=np.float32)
+    if N < k + 1:
+        out[:, 2] = 1.0  # degenerirano: normala prema gore
+        return out
+    tree = cKDTree(xyz)
+    for s in range(0, N, chunk):
+        e = min(s + chunk, N)
+        _, nn = tree.query(xyz[s:e], k=k, workers=-1)
+        pts = xyz[nn]                                   # (M, k, 3)
+        pts = pts - pts.mean(axis=1, keepdims=True)
+        cov = np.einsum("mki,mkj->mij", pts, pts) / k   # (M, 3, 3)
+        w, v = np.linalg.eigh(cov)                      # w rastuće: l3<=l2<=l1
+        l3, l2, l1 = w[:, 0], w[:, 1], w[:, 2]
+        l1 = np.maximum(l1, 1e-12)
+        normal = v[:, :, 0]                             # svojstveni v. najmanje λ
+        flip = normal[:, 2] < 0                         # orijentiraj prema gore
+        normal[flip] = -normal[flip]
+        out[s:e, 0:3] = normal
+        out[s:e, 3] = (l1 - l2) / l1                    # linearity
+        out[s:e, 4] = (l2 - l3) / l1                    # planarity
+        out[s:e, 5] = l3 / l1                           # sphericity
+    return np.nan_to_num(out, nan=0.0)
+
+
+def pack_features(rgb, intensity, hag, geom=None):
+    """Pack u (N, 11): [R,G,B, intensity, HAG, nx,ny,nz, lin,plan,sph]."""
     N = len(hag)
     feats = np.zeros((N, FEAT_DIM), dtype=np.float32)
     if rgb is not None:
@@ -308,7 +353,24 @@ def pack_features(rgb, intensity, hag):
     if intensity is not None:
         feats[:, 3] = intensity
     feats[:, 4] = hag
+    if geom is not None:
+        feats[:, 5:11] = geom
+    else:
+        feats[:, 7] = 1.0  # fallback normala prema gore
     return feats
+
+
+def voxel_downsample_arrays(xyz, voxel, *arrays):
+    """Voxel downsample (prva točka po ćeliji) za xyz + prateće nizove."""
+    if voxel <= 0:
+        return (xyz,) + arrays
+    grid = np.floor(xyz / voxel).astype(np.int64)
+    grid -= grid.min(axis=0)
+    dims = grid.max(axis=0) + 1
+    key = (grid[:, 0] * dims[1] + grid[:, 1]) * dims[2] + grid[:, 2]
+    _, pick = np.unique(key, return_index=True)
+    return (xyz[pick],) + tuple(a[pick] if a is not None else None
+                                for a in arrays)
 
 
 def height_above_ground_from_labels(xyz, labels, ground_label=1, cell=1.0):
@@ -1132,9 +1194,12 @@ def load_parislille(root, stride=1):
 def preprocess_to_cache(scans, cache_dir, start_idx=0, max_points=20_000_000):
     """Precompute HAG+features for each scan, save as .npz, return count.
 
+    FAZA A: cache sad sprema VEĆ VOXELIZIRANE točke (2 cm) s punih 11
+    značajki uključujući normale i tensor značajke (compute_geometry).
+    Voxelizacija se više NE radi u _load_scan — cache je finalni oblik.
+
     Each scan is saved as cache_dir/scan_{idx:06d}.npz with keys:
-      xyz (N,3), feats (N,5), labels (N,)
-    After saving, the scan data is freed from memory.
+      xyz (N,3), feats (N,11), labels (N,)
     max_points: subsample scans larger than this to fit in RAM.
     Returns the number of scans saved.
     """
@@ -1166,8 +1231,15 @@ def preprocess_to_cache(scans, cache_dir, start_idx=0, max_points=20_000_000):
                     intensity = intensity[pick]
                 print(f"      scan {idx}: {n:,} → {max_points:,} (subsampled)")
 
+            # 1) Voxelizacija ODMAH (prije je bila u _load_scan) — geometrija
+            #    se računa na voxeliziranim točkama, jednom zauvijek.
+            xyz = xyz.astype(np.float32)
+            xyz, rgb, intensity, labels = voxel_downsample_arrays(
+                xyz, 0.02, rgb, intensity, labels)
+            # 2) HAG + normale + tensor značajke
             hag = height_above_ground_from_labels(xyz, labels)
-            feats = pack_features(rgb, intensity, hag)
+            geom = compute_geometry(xyz)
+            feats = pack_features(rgb, intensity, hag, geom)
             np.savez_compressed(out_path,
                                 xyz=xyz.astype(np.float32),
                                 feats=feats.astype(np.float32),
@@ -1195,8 +1267,9 @@ class PointCloudTileDataset(Dataset):
     def __init__(self, scan_paths, crop_points=131072, voxel=0.02,
                  augment=True, do_mod_drop=True, steps_per_epoch=1000,
                  scan_datasets=None, cache_size=50,
-                 dataset_weights=None, ds_names=None):
+                 dataset_weights=None, ds_names=None, feat_mode="classic5"):
         self.scan_paths = scan_paths       # list of Path to .npz files
+        self.feat_idx = FEAT_SLICES[feat_mode]
         self.crop = crop_points
         self.voxel = voxel
         self.augment = augment
@@ -1323,11 +1396,14 @@ class PointCloudTileDataset(Dataset):
         data = np.load(self.scan_paths[si])
         entry = (data["xyz"], data["feats"], data["labels"])
 
-        # OPTIMIZACIJA: voxel downsample ODMAH, prije spremanja u cache.
-        # Downsample je deterministički po scanu — računati ga za svaki
-        # uzorak iznova (np.unique na 20M točaka, ~10s CPU) bio je glavni
-        # trošak pripreme podataka. Ovako se plati jednom po scanu.
-        entry = self._voxel_ds(*entry)
+        # Novi cache (FAZA A) je već voxeliziran i ima 11 značajki.
+        # Stari cache (5 značajki) nije podržan — izgradi novi.
+        if entry[1].shape[1] != FEAT_DIM:
+            raise RuntimeError(
+                f"Cache {self.scan_paths[si].name} ima {entry[1].shape[1]} "
+                f"značajki, očekujem {FEAT_DIM}. Stari cache — obriši "
+                f"cache_dir i pusti da se izgradi novi (s normalama i "
+                f"tensor značajkama).")
 
         # Copy-paste banka: pri učitavanju scana uberi instance rijetkih
         # klasa (fence/vehicle) za kasnije lijepljenje u druge cropove
@@ -1389,9 +1465,12 @@ class PointCloudTileDataset(Dataset):
         if not self.augment:
             np.random.set_state(rng_state)
 
-        return (torch.from_numpy(xyz).float(),
-                torch.from_numpy(feats).float(),
-                torch.from_numpy(labels).long(),
+        # Odaberi stupce značajki za model (classic5 / classic8 / sonata11)
+        feats = feats[:, self.feat_idx]
+
+        return (torch.from_numpy(np.ascontiguousarray(xyz)).float(),
+                torch.from_numpy(np.ascontiguousarray(feats)).float(),
+                torch.from_numpy(np.ascontiguousarray(labels)).long(),
                 ds_id)
 
     def _voxel_ds(self, xyz, feats, labels):
@@ -1445,18 +1524,21 @@ class PointCloudTileDataset(Dataset):
 
     def _augment(self, xyz, feats):
         xyz = xyz.copy()
-        # Random yaw rotation
+        feats = feats.copy()
+        # Random yaw rotation — normale (stupci 5:8) rotiraju istom matricom!
         t = np.random.uniform(0, 2 * np.pi)
         c, s = np.cos(t), np.sin(t)
         R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float32)
         xyz = xyz @ R.T
-        # Scale
+        feats[:, 5:8] = feats[:, 5:8] @ R.T
+        # Scale (normale su jedinične — skaliranje ih ne mijenja)
         xyz *= np.random.uniform(0.9, 1.1)
         # Jitter
         xyz += np.random.normal(0, 0.01, xyz.shape).astype(np.float32)
-        # Random flip
+        # Random flip — i x-komponenta normale mijenja predznak
         if np.random.rand() < 0.5:
             xyz[:, 0] = -xyz[:, 0]
+            feats[:, 5] = -feats[:, 5]
         return xyz, feats
 
 
@@ -1771,16 +1853,25 @@ def train(cfg):
     for di, dname in enumerate(ds_names):
         dataset_weights[di] = ds_cfgs.get(dname, {}).get("weight", 1.0)
 
+    # feat_mode: "sonata11" za Sonata model, inače prema in_feat_dim (5 ili 8)
+    model_type = cfg.get("model", "ptv3")
+    if model_type == "sonata":
+        feat_mode = "sonata11"
+    else:
+        feat_mode = "classic8" if cfg.get("in_feat_dim", 5) == 8 else "classic5"
+    print(f"  Model type: {model_type}, feat_mode: {feat_mode}")
+
     train_ds = PointCloudTileDataset(
         train_npz_paths, crop_points=crop, voxel=voxel,
         augment=True, do_mod_drop=True, steps_per_epoch=steps,
         scan_datasets=train_ds_ids, cache_size=50,
-        dataset_weights=dataset_weights, ds_names=ds_names)
+        dataset_weights=dataset_weights, ds_names=ds_names,
+        feat_mode=feat_mode)
     val_ds = PointCloudTileDataset(
         val_npz_paths if val_npz_paths else train_npz_paths[:1],
         crop_points=crop, voxel=voxel,
         augment=False, do_mod_drop=False, steps_per_epoch=min(100, steps),
-        cache_size=20)
+        cache_size=20, feat_mode=feat_mode)
 
     # IMPORTANT: num_workers=0 for lazy loading (LRU cache is not fork-safe)
     train_loader = DataLoader(
@@ -1793,20 +1884,33 @@ def train(cfg):
 
     gc.collect()
 
-    # ---- Model (Point Transformer V3) ----
+    # ---- Model ----
     ptv3_cfg = cfg.get("ptv3", {})
-    model = PointTransformerV3(
-        in_feat_dim=cfg.get("in_feat_dim", 5),
-        num_classes=num_classes,
-        dims=tuple(ptv3_cfg.get("dims", [48, 96, 192, 384])),
-        num_heads=tuple(ptv3_cfg.get("num_heads", [3, 6, 12, 24])),
-        depths=tuple(ptv3_cfg.get("depths", [2, 2, 6, 2])),
-        window_size=ptv3_cfg.get("window_size", 256),
-        grid_sizes=tuple(ptv3_cfg.get("grid_sizes", [0.08, 0.16, 0.32])),
-        drop=ptv3_cfg.get("drop", 0.0),
-        serialize_grid=ptv3_cfg.get("serialize_grid", 0.04),
-        multi_curve=ptv3_cfg.get("multi_curve", True),
-    ).to(device)
+    if model_type == "sonata":
+        # FAZA A1: Sonata pretrenirani PTv3 encoder (facebook/sonata) +
+        # naša segmentacijska glava. Vidi model_sonata.py.
+        from model_sonata import SonataSeg
+        sonata_cfg = cfg.get("sonata", {})
+        model = SonataSeg(
+            num_classes=num_classes,
+            ckpt=sonata_cfg.get("ckpt", None),        # None → HuggingFace
+            enable_flash=sonata_cfg.get("enable_flash", False),
+            head_hidden=sonata_cfg.get("head_hidden", 256),
+            grid_size=voxel,
+        ).to(device)
+    else:
+        model = PointTransformerV3(
+            in_feat_dim=cfg.get("in_feat_dim", 5),
+            num_classes=num_classes,
+            dims=tuple(ptv3_cfg.get("dims", [48, 96, 192, 384])),
+            num_heads=tuple(ptv3_cfg.get("num_heads", [3, 6, 12, 24])),
+            depths=tuple(ptv3_cfg.get("depths", [2, 2, 6, 2])),
+            window_size=ptv3_cfg.get("window_size", 256),
+            grid_sizes=tuple(ptv3_cfg.get("grid_sizes", [0.08, 0.16, 0.32])),
+            drop=ptv3_cfg.get("drop", 0.0),
+            serialize_grid=ptv3_cfg.get("serialize_grid", 0.04),
+            multi_curve=ptv3_cfg.get("multi_curve", True),
+        ).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params:,}")
 
@@ -1866,7 +1970,19 @@ def train(cfg):
     print(f"\n=== Training: {epochs} epochs, {steps} steps/epoch, batch={batch_size} ===")
     print(f"    Tracking loss for {n_datasets} datasets: {', '.join(ds_names)}\n")
 
+    # Sonata: zamrzni encoder prvih N epoha (uči se samo glava), pa odmrzni
+    # sve s malim lr-om — standardni recept za fine-tuning pretreniranih mreža
+    freeze_epochs = (int(cfg.get("sonata", {}).get("freeze_encoder_epochs", 5))
+                     if model_type == "sonata" else 0)
+
     for epoch in range(1, epochs + 1):
+        if freeze_epochs and hasattr(model, "encoder"):
+            frozen = epoch <= freeze_epochs
+            for p in model.encoder.parameters():
+                p.requires_grad = not frozen
+            if epoch in (1, freeze_epochs + 1):
+                state = "ZAMRZNUT" if frozen else "ODMRZNUT"
+                print(f"  [sonata] encoder {state} (epoha {epoch})")
         model.train()
         total_loss = 0.0
         # Per-dataset loss tracking
@@ -2018,7 +2134,9 @@ def train(cfg):
                 "cfg": {
                     "num_classes": num_classes,
                     "in_feat_dim": cfg.get("in_feat_dim", 5),
-                    "model": "ptv3",
+                    "model": model_type,
+                    "feat_mode": feat_mode,
+                    "sonata": cfg.get("sonata", {}),
                     "ptv3": {**ptv3_cfg,
                              "multi_curve": ptv3_cfg.get("multi_curve", True)},
                 },
